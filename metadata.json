@@ -1,0 +1,6 @@
+{
+  "name": "faltei.",
+  "description": "Gestor estratégico e bem-humorado de presença e orçamento de faltas para universitários (Medicina UNIRIO 2026.2).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,578 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { CATALOGO_2026_2, SEMESTRE_2026_2 } from '../data/seed2026_2';
+import { UserFalta, UserMateria } from '../types/domain';
+import {
+  calculateMateriaStats,
+  countScheduledMeetings,
+  diffCatalogs,
+  getDynamicHeroGreeting,
+  getPeriodoStyle,
+  simulateAbsenceRange,
+  sortMateriasByUrgency,
+} from './attendance';
+import {
+  applyCatalogLinkToCandidate,
+  isStale2026Catalog,
+  matchExtractedToCatalogo,
+} from './catalogMatcher';
+import {
+  buildSemAulaConsensoId,
+  filterAvisosForMaterias,
+  getClassSemAulaConsensus,
+  getEnrolledCountForMateria,
+  resolveDisciplinaKey,
+  sanitizeAuthorDisplayName,
+  slugifyDisciplinaNome,
+} from './disciplinaKey';
+import {
+  buildCalendarMonthCells,
+  countMonthSummary,
+  getCalendarBadgeMeta,
+  getMonthLabelPtBr,
+  shiftYearMonth,
+} from './calendar';
+
+const baseMateriaHoras: UserMateria = {
+  id: 'mat_urinario',
+  userId: 'u1',
+  semestreId: '2026.2',
+  nome: 'Sistema Urinário',
+  local: 'Instituto Biomédico',
+  periodo: '1',
+  horarios: [{ diaSemana: 5, horarioInicio: '08:00', horarioFim: '12:00', horas: 4 }],
+  regraModo: 'horas_totais',
+  cargaHorariaTotal: 64,
+  percentualLimite: 25,
+  cotaIsoladaPorDia: false,
+};
+
+test('2026.2 seed has exact 86 subjects, 16 divisaoDiferente, and exact period hours matching PDF', () => {
+  assert.equal(CATALOGO_2026_2.length, 86);
+  assert.equal(CATALOGO_2026_2.filter((d) => d.divisaoDiferente).length, 16);
+
+  const countByPeriodo = (p: string) => CATALOGO_2026_2.filter((d) => d.periodo === p).length;
+  const hoursByPeriodo = (p: string) =>
+    CATALOGO_2026_2.filter((d) => d.periodo === p).reduce((acc, d) => acc + d.cargaHorariaTotal, 0);
+
+  assert.equal(countByPeriodo('1'), 7);
+  assert.equal(hoursByPeriodo('1'), 535);
+
+  assert.equal(countByPeriodo('2'), 8);
+  assert.equal(hoursByPeriodo('2'), 576);
+
+  assert.equal(countByPeriodo('3'), 8);
+  assert.equal(hoursByPeriodo('3'), 580);
+
+  assert.equal(countByPeriodo('4'), 10);
+  assert.equal(hoursByPeriodo('4'), 488);
+
+  assert.equal(countByPeriodo('5'), 8);
+  assert.equal(hoursByPeriodo('5'), 446);
+
+  assert.equal(countByPeriodo('6'), 9);
+  assert.equal(hoursByPeriodo('6'), 444);
+
+  assert.equal(countByPeriodo('7'), 10);
+  assert.equal(hoursByPeriodo('7'), 466);
+
+  assert.equal(countByPeriodo('8'), 10);
+  assert.equal(hoursByPeriodo('8'), 572);
+
+  assert.equal(countByPeriodo('optativa'), 16);
+
+  // Unified PSIII check
+  const ps3 = CATALOGO_2026_2.find((d) => d.id === 'unirio_2026_2_p3_praticas_saude_3_unificada');
+  assert.ok(ps3);
+  assert.equal(ps3.divisaoDiferente, true);
+  assert.equal(ps3.cargaHorariaTotal, 92);
+  assert.equal(ps3.horarios.length, 2);
+
+  // 2ªF has 14 school days in 2026.2 (17 - 3 holidays: 07/09, 12/10, 02/11)
+  const monDays = countScheduledMeetings(
+    [{ diaSemana: 1, horarioInicio: '08:00', horarioFim: '10:00', horas: 2 }],
+    SEMESTRE_2026_2.dataInicio,
+    SEMESTRE_2026_2.dataFim,
+    SEMESTRE_2026_2.feriados
+  );
+  assert.equal(monDays, 14);
+  // 6ªF has 16 school days (17 - 1 holiday: 20/11)
+  const friDays = countScheduledMeetings(
+    [{ diaSemana: 5, horarioInicio: '08:00', horarioFim: '12:00', horas: 4 }],
+    SEMESTRE_2026_2.dataInicio,
+    SEMESTRE_2026_2.dataFim,
+    SEMESTRE_2026_2.feriados
+  );
+  assert.equal(friDays, 16);
+});
+
+test('Mode 1 (horas_totais) computes 25% quota, sem_aula reduction, and risk levels', () => {
+  const faltas: UserFalta[] = [
+    { id: 'f1', userId: 'u1', materiaId: 'mat_urinario', data: '2026-09-04', diaSemana: 5, horas: 4, tipo: 'falta' },
+    { id: 'f2', userId: 'u1', materiaId: 'mat_urinario', data: '2026-09-11', diaSemana: 5, horas: 4, tipo: 'programada' },
+  ];
+  const stats = calculateMateriaStats(baseMateriaHoras, faltas, SEMESTRE_2026_2, '2026-11-23');
+  assert.equal(stats.limiteTotal, 16);
+  assert.equal(stats.consumidoConfirmado, 4);
+  assert.equal(stats.consumidoProgramado, 4);
+  assert.equal(stats.restanteLivre, 8);
+  assert.equal(stats.percentualConsumido, 50);
+  assert.equal(stats.status, 'SEGURO');
+  assert.match(stats.traducaoHumana, /Restam 8h livres/);
+  assert.match(stats.traducaoHumana, /2 aulas de 4h/);
+
+  const faltasEstouradas: UserFalta[] = [
+    ...faltas,
+    { id: 'f3', userId: 'u1', materiaId: 'mat_urinario', data: '2026-09-18', diaSemana: 5, horas: 4, tipo: 'falta' },
+    { id: 'f4', userId: 'u1', materiaId: 'mat_urinario', data: '2026-09-25', diaSemana: 5, horas: 4, tipo: 'falta' },
+  ];
+  const statsEst = calculateMateriaStats(baseMateriaHoras, faltasEstouradas, SEMESTRE_2026_2, '2026-11-23');
+  assert.equal(statsEst.status, 'ESTOURADO');
+  assert.equal(statsEst.zonaCriticaTerracota, true);
+
+  const faltasSemAula: UserFalta[] = [
+    { id: 's1', userId: 'u1', materiaId: 'mat_urinario', data: '2026-08-21', diaSemana: 5, horas: 4, tipo: 'sem_aula' },
+  ];
+  const statsSemAula = calculateMateriaStats(baseMateriaHoras, faltasSemAula, SEMESTRE_2026_2, '2026-11-23');
+  assert.equal(statsSemAula.limiteTotal, 15);
+  assert.equal(statsSemAula.aulasCanceladasCount, 1);
+});
+
+test('Mode 2 (diferente_por_dia) with isolated quotas flags critical per day/modality', () => {
+  const matIsolated: UserMateria = {
+    id: 'mat_locomotor',
+    userId: 'u1',
+    semestreId: '2026.2',
+    nome: 'Sistema Locomotor',
+    periodo: '1',
+    horarios: [
+      { diaSemana: 4, horarioInicio: '13:00', horarioFim: '16:00', horas: 3 },
+      { diaSemana: 5, horarioInicio: '13:00', horarioFim: '15:00', horas: 2 },
+    ],
+    regraModo: 'diferente_por_dia',
+    cargaHorariaTotal: 83,
+    percentualLimite: 25,
+    cotaIsoladaPorDia: true,
+  };
+  const fridayFaltas: UserFalta[] = ['2026-08-21', '2026-08-28', '2026-09-04', '2026-09-11'].map((d, i) => ({
+    id: `ff_${i}`,
+    userId: 'u1',
+    materiaId: 'mat_locomotor',
+    data: d,
+    diaSemana: 5,
+    horas: 2,
+    tipo: 'falta',
+  }));
+  const stats = calculateMateriaStats(matIsolated, fridayFaltas, SEMESTRE_2026_2, '2026-11-23');
+  assert.equal(stats.status, 'ESTOURADO');
+  assert.equal(stats.subCotasPorDia.length, 2);
+});
+
+test('Mode 3 (por_encontros) ignores hour duration and uses meeting counts', () => {
+  const matEnc: UserMateria = {
+    ...baseMateriaHoras,
+    id: 'mat_enc',
+    regraModo: 'por_encontros',
+    encontrosTotaisSemestre: 30,
+  };
+  const faltas: UserFalta[] = ['2026-09-04', '2026-09-11', '2026-09-18', '2026-09-25', '2026-10-02', '2026-10-09'].map(
+    (d, i) => ({
+      id: `e_${i}`,
+      userId: 'u1',
+      materiaId: 'mat_enc',
+      data: d,
+      diaSemana: 5,
+      horas: 4,
+      tipo: 'falta',
+    })
+  );
+  const stats = calculateMateriaStats(matEnc, faltas, SEMESTRE_2026_2, '2026-11-23');
+  assert.equal(stats.unidade, 'encontros');
+  assert.equal(stats.limiteTotal, 7);
+  assert.equal(stats.restanteLivre, 1);
+  assert.equal(stats.status, 'CRÍTICO');
+});
+
+test('Simulator crosses date range, skips holidays, and returns comic verdict', () => {
+  const sim = simulateAbsenceRange(
+    [baseMateriaHoras],
+    [],
+    SEMESTRE_2026_2,
+    '2026-11-20',
+    '2026-11-27',
+    '2026-11-18'
+  );
+  assert.equal(sim.feriadosNoPeriodo.length, 1);
+  assert.equal(sim.totalFaltasAGerar, 1);
+  assert.equal(sim.vereditoRisco, 'ok');
+});
+
+test('Urgency sort, UNIRIO period styles, greeting, and catalog diff behave predictably', () => {
+  const s1 = calculateMateriaStats(baseMateriaHoras, [], SEMESTRE_2026_2, '2026-11-23');
+  const s2 = calculateMateriaStats(
+    { ...baseMateriaHoras, id: 'm2', nome: 'Crítica' },
+    [
+      { id: 'c1', userId: 'u1', materiaId: 'm2', data: '2026-09-04', diaSemana: 5, horas: 12, tipo: 'falta' },
+    ],
+    SEMESTRE_2026_2,
+    '2026-11-23'
+  );
+  const sorted = sortMateriasByUrgency([s1, s2]);
+  assert.equal(sorted[0].materia.id, 'm2');
+
+  assert.equal(getPeriodoStyle('1').borderColor, '#1E3A8A');
+  assert.equal(getPeriodoStyle('3').badgeBg, '#CCFBF1');
+  assert.equal(getPeriodoStyle('3').badgeText, '#0F766E');
+  assert.equal(getPeriodoStyle('8').borderColor, '#0E1A59');
+  assert.equal(getPeriodoStyle('optativa').borderColor, '#EC1580');
+  assert.equal(getPeriodoStyle('optativa').badgeBg, '#FCE7F3');
+  assert.equal(getPeriodoStyle('optativa').badgeText, '#BE185D');
+
+  const greeting = getDynamicHeroGreeting([s1], [], SEMESTRE_2026_2, '2026-11-23');
+  assert.match(greeting.headline, /fingir responsabilidade/);
+
+  const diff = diffCatalogs(CATALOGO_2026_2.slice(0, 2), [
+    { ...CATALOGO_2026_2[0], cargaHorariaTotal: 140 },
+    { ...CATALOGO_2026_2[2], id: 'nova_2027' },
+  ]);
+  assert.equal(diff.filter((d) => d.status === 'updated').length, 1);
+  assert.equal(diff.filter((d) => d.status === 'added').length, 1);
+  assert.equal(diff.filter((d) => d.status === 'removed').length, 1);
+});
+
+test('Smart print catalogMatcher cross-references UNIRIO screenshots with official 2026.2 catalog', () => {
+  const results = matchExtractedToCatalogo(
+    [
+      {
+        nome: 'FARMACOLOGIA II - TURMA A',
+        horarios: [
+          { diaSemana: 2, horarioInicio: '10:00', horarioFim: '12:00', horas: 2 },
+          { diaSemana: 4, horarioInicio: '13:00', horarioFim: '17:00', horas: 4 },
+        ],
+      },
+      {
+        nome: 'SEMIOLOGIA E PROPEDEUTICA DO ADULTO I',
+        horarios: [
+          { diaSemana: 4, horarioInicio: '10:00', horarioFim: '12:00', horas: 2 },
+          { diaSemana: 4, horarioInicio: '13:00', horarioFim: '17:00', horas: 4 },
+        ],
+      },
+      {
+        nome: 'Liga Academica Extra Unirio',
+        horarios: [{ diaSemana: 6, horarioInicio: '09:00', horarioFim: '11:00', horas: 2 }],
+      },
+    ],
+    CATALOGO_2026_2
+  );
+
+  assert.equal(results.length, 3);
+  assert.equal(results[0].matchedCatalogo?.id, 'unirio_2026_2_p5_farmacologia_2');
+  assert.equal(results[0].periodo, '5');
+  assert.equal(results[0].cargaHorariaTotal, 102);
+  assert.equal(results[0].regraModo, 'diferente_por_dia');
+
+  assert.equal(results[1].matchedCatalogo?.id, 'unirio_2026_2_p4_semiologia_adulto_1');
+  assert.equal(results[1].cargaHorariaTotal, 102);
+  assert.equal(results[1].regraModo, 'horas_totais');
+
+  assert.equal(results[2].matchedCatalogo, null);
+  assert.equal(results[2].matchConfidence, 'manual');
+
+  const relinked = applyCatalogLinkToCandidate(results[2], CATALOGO_2026_2[0]);
+  assert.equal(relinked.matchedCatalogo?.id, CATALOGO_2026_2[0].id);
+  assert.equal(relinked.cargaHorariaTotal, CATALOGO_2026_2[0].cargaHorariaTotal);
+
+  // Stale catalog detection
+  assert.equal(isStale2026Catalog(CATALOGO_2026_2), false);
+  assert.equal(
+    isStale2026Catalog(
+      CATALOGO_2026_2.filter((d) => d.id !== 'unirio_2026_2_p4_anatomia_patologica_1')
+    ),
+    true
+  );
+  assert.equal(
+    isStale2026Catalog([
+      { ...CATALOGO_2026_2[0], id: 'mat_2027_1', semestreId: '2027.1' },
+    ]),
+    false
+  );
+});
+
+test('disciplinaKey normalizes manual subject names deterministically for shared counts and collective notices', () => {
+  assert.equal(slugifyDisciplinaNome('  Anatomia Clínica! '), 'anatomia-clinica');
+  assert.equal(slugifyDisciplinaNome('ANATOMIA CLÍNICA'), 'anatomia-clinica');
+  assert.equal(slugifyDisciplinaNome('Farmacologia   Avançada — Turma B'), 'farmacologia-avancada-turma-b');
+  assert.equal(slugifyDisciplinaNome('   ---   '), 'disciplina');
+
+  // Truncation respects 96-char Firestore-safe limit without trailing hyphens
+  const longSlug = slugifyDisciplinaNome('Disciplina '.repeat(15));
+  assert.ok(longSlug.length <= 96);
+  assert.equal(longSlug.endsWith('-'), false);
+
+  // Resolution priority: catalogoId > existing disciplinaKey > slugify(nome)
+  assert.equal(
+    resolveDisciplinaKey({
+      catalogoId: 'unirio_2026_2_p4_semiologia_adulto_1',
+      disciplinaKey: 'semiologia',
+      nome: 'Semiologia',
+    }),
+    'unirio_2026_2_p4_semiologia_adulto_1'
+  );
+  assert.equal(
+    resolveDisciplinaKey({
+      disciplinaKey: 'liga-de-cirurgia',
+      nome: 'Liga de Cirurgia Geral',
+    }),
+    'liga-de-cirurgia'
+  );
+
+  // Two students manually adding the same subject without catalogoId get identical keys
+  const studentA: UserMateria = {
+    ...baseMateriaHoras,
+    id: 'm_a',
+    userId: 'u_a',
+    nome: 'Farmacologia Clínica',
+  };
+  const studentB: UserMateria = {
+    ...baseMateriaHoras,
+    id: 'm_b',
+    userId: 'u_b',
+    nome: '  farmacologia clinica! ',
+  };
+  const keyA = resolveDisciplinaKey(studentA);
+  const keyB = resolveDisciplinaKey(studentB);
+  assert.equal(keyA, 'farmacologia-clinica');
+  assert.equal(keyA, keyB);
+
+  const comunidadeMap = {
+    'farmacologia-clinica': {
+      key: 'farmacologia-clinica',
+      nome: 'Farmacologia Clínica',
+      semestreId: '2026.2',
+      inscritosCount: 12,
+      updatedAt: '2026-11-23T12:00:00.000Z',
+    },
+  };
+  assert.equal(getEnrolledCountForMateria(studentA, comunidadeMap), 12);
+  assert.equal(getEnrolledCountForMateria(studentB, comunidadeMap), 12);
+  assert.equal(getEnrolledCountForMateria(baseMateriaHoras, comunidadeMap), 0);
+
+  const avisos = [
+    {
+      id: 'av1',
+      disciplinaKey: 'farmacologia-clinica',
+      disciplinaNome: 'Farmacologia Clínica',
+      semestreId: '2026.2',
+      data: '2026-11-23',
+      tipo: 'sem_aula' as const,
+      mensagem: 'Aula cancelada pelo docente',
+      autorUid: 'u_a',
+      autorNome: 'Aluno A',
+      isOficial: false,
+      confirmacoes: 3,
+      createdAt: '2026-11-23T08:00:00.000Z',
+    },
+    {
+      id: 'av2',
+      disciplinaKey: 'outra-materia',
+      disciplinaNome: 'Outra Matéria',
+      semestreId: '2026.2',
+      data: '2026-11-24',
+      tipo: 'aviso' as const,
+      mensagem: 'Não deve aparecer para aluno B',
+      autorUid: 'u_x',
+      autorNome: 'Aluno X',
+      isOficial: false,
+      confirmacoes: 1,
+      createdAt: '2026-11-23T09:00:00.000Z',
+    },
+  ];
+  const filtered = filterAvisosForMaterias(avisos, [studentB]);
+  assert.equal(filtered.length, 1);
+  assert.equal(filtered[0].id, 'av1');
+});
+
+test('Calendar builder plots monthly cells with provas, trabalhos em grupo, seminários, sem aula, holidays, and classes', () => {
+  assert.equal(getMonthLabelPtBr(2026, 10), 'Novembro 2026');
+  assert.deepEqual(shiftYearMonth(2026, 11, 1), { year: 2027, monthIndex0: 0 });
+  assert.equal(getCalendarBadgeMeta('trabalho_grupo').label, 'Trabalho em grupo');
+  assert.equal(getCalendarBadgeMeta('sem_aula').label, 'Não tem aula');
+
+  const cells = buildCalendarMonthCells({
+    year: 2026,
+    monthIndex0: 10, // November 2026
+    todayStr: '2026-11-23',
+    semestreConfig: SEMESTRE_2026_2,
+    materias: [baseMateriaHoras],
+    faltas: [
+      {
+        id: 'f_sem',
+        userId: 'u1',
+        materiaId: baseMateriaHoras.id,
+        data: '2026-11-13',
+        diaSemana: 5,
+        horas: 4,
+        tipo: 'sem_aula',
+      },
+    ],
+    eventos: [
+      {
+        id: 'ev1',
+        userId: 'u1',
+        materiaId: baseMateriaHoras.id,
+        disciplinaNome: 'Sistema Urinário',
+        semestreId: '2026.2',
+        data: '2026-11-24',
+        tipo: 'prova',
+        titulo: 'P2 Teórica',
+      },
+      {
+        id: 'ev2',
+        userId: 'u1',
+        materiaId: baseMateriaHoras.id,
+        disciplinaNome: 'Sistema Urinário',
+        semestreId: '2026.2',
+        data: '2026-11-25',
+        tipo: 'trabalho_grupo',
+        titulo: 'Caso Clínico',
+        grupo: 'Grupo 3',
+      },
+      {
+        id: 'ev3',
+        userId: 'u1',
+        materiaId: baseMateriaHoras.id,
+        disciplinaNome: 'Sistema Urinário',
+        semestreId: '2026.2',
+        data: '2026-11-27',
+        tipo: 'seminario',
+        titulo: 'Seminário Renal',
+      },
+    ],
+    avisosColetivos: [
+      {
+        id: 'av_cal',
+        disciplinaKey: resolveDisciplinaKey(baseMateriaHoras),
+        disciplinaNome: 'Sistema Urinário',
+        semestreId: '2026.2',
+        data: '2026-11-23',
+        tipo: 'sem_aula',
+        mensagem: 'Professor em congresso',
+        autorUid: 'u2',
+        autorNome: 'Colega',
+        isOficial: false,
+        confirmacoes: 4,
+      },
+    ],
+    activeFilter: 'all',
+  });
+
+  assert.ok(cells.length === 35 || cells.length === 42);
+  const nov20 = cells.find((c) => c.isoDate === '2026-11-20');
+  assert.ok(nov20);
+  assert.equal(nov20.isHoliday, true);
+  assert.equal(nov20.iconSummary.includes('feriado'), true);
+  // No regular class on holiday
+  assert.equal(nov20.classesCount, 0);
+
+  const nov24 = cells.find((c) => c.isoDate === '2026-11-24');
+  assert.ok(nov24);
+  assert.equal(nov24.iconSummary[0], 'prova');
+
+  const nov25 = cells.find((c) => c.isoDate === '2026-11-25');
+  assert.ok(nov25);
+  assert.equal(nov25.iconSummary[0], 'trabalho_grupo');
+  assert.equal(nov25.items[0].grupo, 'Grupo 3');
+
+  const nov23 = cells.find((c) => c.isoDate === '2026-11-23');
+  assert.ok(nov23);
+  assert.equal(nov23.isToday, true);
+  assert.equal(nov23.iconSummary.includes('sem_aula'), true);
+
+  const summary = countMonthSummary(cells);
+  assert.equal(summary.provas, 1);
+  assert.equal(summary.trabalhos, 1);
+  assert.equal(summary.seminarios, 1);
+  assert.ok(summary.semAula >= 3); // 2 holidays (02/11, 20/11) + sem_aula falta + sem_aula aviso
+
+  const evalCells = buildCalendarMonthCells({
+    year: 2026,
+    monthIndex0: 10,
+    todayStr: '2026-11-23',
+    semestreConfig: SEMESTRE_2026_2,
+    materias: [baseMateriaHoras],
+    faltas: [],
+    eventos: [
+      {
+        id: 'ev1',
+        userId: 'u1',
+        disciplinaNome: 'Sistema Urinário',
+        semestreId: '2026.2',
+        data: '2026-11-24',
+        tipo: 'prova',
+        titulo: 'P2',
+      },
+    ],
+    avisosColetivos: [],
+    activeFilter: 'avaliacoes',
+  });
+  const evalOnlySummary = countMonthSummary(evalCells);
+  assert.equal(evalOnlySummary.provas, 1);
+  assert.equal(evalOnlySummary.aulas, 0);
+});
+
+test('Author display name sanitization and crowd sem_aula consensus propagate into calendar class items', () => {
+  assert.equal(sanitizeAuthorDisplayName('  Matheus   Henrique  ', 'mat@unirio.br'), 'Matheus Henrique');
+  assert.equal(sanitizeAuthorDisplayName('', 'ana.silva@edu.unirio.br'), 'ana.silva');
+  assert.equal(sanitizeAuthorDisplayName('', ''), 'Estudante');
+
+  const key = resolveDisciplinaKey(baseMateriaHoras);
+  const cId = buildSemAulaConsensoId('2026.2', key, '2026-11-27');
+  assert.ok(cId.length <= 128);
+  assert.match(cId, /^[a-zA-Z0-9._-]+$/);
+
+  const consensoMap = {
+    [cId]: {
+      id: cId,
+      disciplinaKey: key,
+      disciplinaNome: baseMateriaHoras.nome,
+      semestreId: '2026.2',
+      data: '2026-11-27',
+      votosCount: 5,
+      ultimoAutorNome: 'Matheus Henrique',
+      votedByMe: false,
+    },
+  };
+
+  const info = getClassSemAulaConsensus({
+    semestreId: '2026.2',
+    disciplinaKey: key,
+    data: '2026-11-27',
+    consensoMap,
+    avisosColetivos: [],
+    currentUserUid: 'u1',
+  });
+  assert.equal(info.count, 5);
+  assert.equal(info.votedByMe, false);
+  assert.equal(info.autorHint, 'Matheus Henrique');
+
+  const calCells = buildCalendarMonthCells({
+    year: 2026,
+    monthIndex0: 10,
+    todayStr: '2026-11-23',
+    semestreConfig: SEMESTRE_2026_2,
+    materias: [baseMateriaHoras],
+    faltas: [],
+    eventos: [],
+    avisosColetivos: [],
+    semAulaConsensoMap: consensoMap,
+  });
+  const nov27 = calCells.find((c) => c.isoDate === '2026-11-27');
+  assert.ok(nov27);
+  assert.equal(nov27.iconSummary.includes('sem_aula'), true);
+  assert.equal(nov27.items[0].semAulaConsensusCount, 5);
+  assert.equal(nov27.items[0].semAulaAutorHint, 'Matheus Henrique');
+});
+
+
+
+

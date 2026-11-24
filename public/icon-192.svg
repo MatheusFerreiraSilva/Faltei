@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="192" height="192" fill="none">
+  <defs>
+    <linearGradient id="unirioNavyMax192" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#14267D"/>
+      <stop offset="100%" stop-color="#09113B"/>
+    </linearGradient>
+    <filter id="maxFaceShadow192" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#040821" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+  <rect width="512" height="512" fill="url(#unirioNavyMax192)"/>
+  <g filter="url(#maxFaceShadow192)">
+    <circle cx="154" cy="172" r="42" fill="#FFFFFF"/>
+    <path d="M386 130L304 172L386 214" stroke="#EC1580" stroke-width="50" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M124 276Q256 300 388 276C380 426 132 426 124 276Z" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="26" stroke-linejoin="round"/>
+  </g>
+</svg>

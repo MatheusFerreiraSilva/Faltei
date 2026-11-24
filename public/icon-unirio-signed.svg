@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" fill="none">
+  <defs>
+    <linearGradient id="unirioNavySigned" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#14267D"/>
+      <stop offset="100%" stop-color="#09113B"/>
+    </linearGradient>
+    <filter id="faceShadowSigned" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="6" stdDeviation="6" flood-color="#040821" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="url(#unirioNavySigned)"/>
+  <rect x="5" y="5" width="502" height="502" rx="111" stroke="#EC1580" stroke-opacity="0.35" stroke-width="4"/>
+  <g filter="url(#faceShadowSigned)">
+    <circle cx="178" cy="134" r="28" fill="#FFFFFF"/>
+    <path d="M356 106L298 134L356 162" stroke="#EC1580" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M168 206Q256 220 344 206C338 296 174 296 168 206Z" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="18" stroke-linejoin="round"/>
+  </g>
+  <text x="256" y="376" text-anchor="middle" fill="#FFFFFF" font-family="'Nunito', system-ui, sans-serif" font-weight="900" font-size="78" letter-spacing="-2">
+    faltei<tspan fill="#EC1580">.</tspan>
+  </text>
+  <rect x="132" y="402" width="248" height="44" rx="22" fill="#EC1580"/>
+  <text x="256" y="431" text-anchor="middle" fill="#FFFFFF" font-family="'JetBrains Mono', monospace" font-weight="800" font-size="22" letter-spacing="3">
+    MED UNIRIO
+  </text>
+</svg>

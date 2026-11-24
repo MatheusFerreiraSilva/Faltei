@@ -1,0 +1,517 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Primitive Helpers ---
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9._\\-]+$');
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Trava exclusiva do administrador único
+    function isAdmin() {
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email == 'mat.ben.henrique@gmail.com';
+    }
+
+    function isValidPeriodo(p) {
+      return p in ['1', '2', '3', '4', '5', '6', '7', '8', 'optativa'];
+    }
+
+    function isValidDateStr(d) {
+      return d is string && d.size() == 10 && d.matches('^\\d{4}-\\d{2}-\\d{2}$');
+    }
+
+    // --- Validation Blueprints ---
+
+    function isValidSemestreConfig(data) {
+      return data.keys().hasAll(['id', 'nome', 'dataInicio', 'dataFim', 'feriados', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'nome', 'dataInicio', 'dataFim', 'feriados', 'updatedAt', 'updatedBy'])
+        && isValidId(data.id)
+        && data.nome is string && data.nome.size() >= 2 && data.nome.size() <= 120
+        && isValidDateStr(data.dataInicio)
+        && isValidDateStr(data.dataFim)
+        && data.feriados is list && data.feriados.size() <= 60
+        && (data.feriados.size() == 0 || (data.feriados[0] is map && data.feriados[0].keys().hasAll(['data', 'nome'])))
+        && data.updatedAt == request.time
+        && (!('updatedBy' in data) || (data.updatedBy is string && data.updatedBy.size() <= 128));
+    }
+
+    function isValidCatalogoDisciplina(data) {
+      return data.keys().hasAll(['id', 'semestreId', 'nome', 'local', 'periodo', 'horarios', 'divisaoDiferente', 'cargaHorariaTotal'])
+        && data.keys().hasOnly(['id', 'semestreId', 'nome', 'local', 'periodo', 'horarios', 'divisaoDiferente', 'cargaHorariaTotal', 'updatedAt'])
+        && isValidId(data.id)
+        && data.semestreId is string && data.semestreId.size() >= 1 && data.semestreId.size() <= 32
+        && data.nome is string && data.nome.size() >= 2 && data.nome.size() <= 160
+        && data.local is string && data.local.size() <= 160
+        && isValidPeriodo(data.periodo)
+        && data.horarios is list && data.horarios.size() >= 1 && data.horarios.size() <= 7
+        && data.horarios[0] is map
+        && data.divisaoDiferente is bool
+        && data.cargaHorariaTotal is number && data.cargaHorariaTotal >= 1 && data.cargaHorariaTotal <= 1000
+        && (!('updatedAt' in data) || data.updatedAt == request.time);
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'periodoAtual', 'percentualPadrao', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid) && data.uid == userId
+        && data.email is string && data.email.size() <= 200
+        && data.displayName is string && data.displayName.size() <= 120
+        && data.role in ['student', 'admin']
+        && (!('periodoAtual' in data) || isValidPeriodo(data.periodoAtual))
+        && (!('percentualPadrao' in data) || (data.percentualPadrao is number && data.percentualPadrao >= 1 && data.percentualPadrao <= 99))
+        && data.createdAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function isValidUserMateria(data, userId, materiaId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'semestreId', 'nome', 'periodo', 'horarios',
+          'regraModo', 'cargaHorariaTotal', 'percentualLimite', 'cotaIsoladaPorDia',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'userId', 'catalogoId', 'disciplinaKey', 'semestreId', 'nome', 'local', 'periodo', 'horarios',
+          'regraModo', 'cargaHorariaTotal', 'percentualLimite', 'cotaIsoladaPorDia',
+          'encontrosTotaisSemestre', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id) && data.id == materiaId
+        && isValidId(data.userId) && data.userId == userId
+        && (!('catalogoId' in data) || (data.catalogoId is string && data.catalogoId.size() <= 128))
+        && (!('disciplinaKey' in data) || isValidId(data.disciplinaKey))
+        && data.semestreId is string && data.semestreId.size() >= 1 && data.semestreId.size() <= 32
+        && data.nome is string && data.nome.size() >= 1 && data.nome.size() <= 160
+        && (!('local' in data) || (data.local is string && data.local.size() <= 160))
+        && isValidPeriodo(data.periodo)
+        && data.horarios is list && data.horarios.size() >= 1 && data.horarios.size() <= 7
+        && data.horarios[0] is map
+        && data.regraModo in ['horas_totais', 'diferente_por_dia', 'por_encontros']
+        && data.cargaHorariaTotal is number && data.cargaHorariaTotal >= 1 && data.cargaHorariaTotal <= 1000
+        && data.percentualLimite is number && data.percentualLimite >= 1 && data.percentualLimite <= 99
+        && data.cotaIsoladaPorDia is bool
+        && (!('encontrosTotaisSemestre' in data) || (data.encontrosTotaisSemestre is number && data.encontrosTotaisSemestre >= 1 && data.encontrosTotaisSemestre <= 400))
+        && data.createdAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function isValidUserFalta(data, userId, faltaId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'materiaId', 'data', 'diaSemana', 'horas', 'tipo', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'userId', 'materiaId', 'data', 'diaSemana', 'horas', 'tipo', 'observacao', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id) && data.id == faltaId
+        && isValidId(data.userId) && data.userId == userId
+        && isValidId(data.materiaId)
+        && isValidDateStr(data.data)
+        && data.diaSemana is number && data.diaSemana >= 1 && data.diaSemana <= 6
+        && data.horas is number && data.horas >= 0.5 && data.horas <= 24
+        && data.tipo in ['falta', 'programada', 'sem_aula']
+        && (!('observacao' in data) || (data.observacao is string && data.observacao.size() <= 240))
+        && data.createdAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function isValidUserEvento(data, userId, eventoId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'disciplinaNome', 'semestreId', 'data', 'tipo', 'titulo', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'userId', 'materiaId', 'disciplinaKey', 'disciplinaNome', 'semestreId',
+          'data', 'tipo', 'titulo', 'detalhes', 'grupo', 'horario', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id) && data.id == eventoId
+        && isValidId(data.userId) && data.userId == userId
+        && (!('materiaId' in data) || isValidId(data.materiaId))
+        && (!('disciplinaKey' in data) || isValidId(data.disciplinaKey))
+        && data.disciplinaNome is string && data.disciplinaNome.size() >= 1 && data.disciplinaNome.size() <= 160
+        && data.semestreId is string && data.semestreId.size() >= 1 && data.semestreId.size() <= 32
+        && isValidDateStr(data.data)
+        && data.tipo in ['prova', 'trabalho', 'trabalho_grupo', 'seminario', 'sem_aula']
+        && data.titulo is string && data.titulo.size() >= 2 && data.titulo.size() <= 160
+        && (!('detalhes' in data) || (data.detalhes is string && data.detalhes.size() <= 240))
+        && (!('grupo' in data) || (data.grupo is string && data.grupo.size() <= 100))
+        && (!('horario' in data) || (data.horario is string && data.horario.size() <= 16))
+        && data.createdAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function isValidDisciplinaComunidade(data, disciplinaKey) {
+      return data.keys().hasAll(['key', 'semestreId', 'nome', 'inscritosCount', 'updatedAt'])
+        && data.keys().hasOnly(['key', 'semestreId', 'nome', 'catalogoId', 'inscritosCount', 'updatedAt'])
+        && isValidId(data.key) && data.key == disciplinaKey
+        && data.semestreId is string && data.semestreId.size() >= 1 && data.semestreId.size() <= 32
+        && data.nome is string && data.nome.size() >= 1 && data.nome.size() <= 160
+        && (!('catalogoId' in data) || (data.catalogoId is string && data.catalogoId.size() <= 128))
+        && data.inscritosCount is number && data.inscritosCount >= 0 && data.inscritosCount <= 100000
+        && data.updatedAt == request.time;
+    }
+
+    function isValidInscritoDisciplina(data, disciplinaKey, userId) {
+      return data.keys().hasAll(['userId', 'disciplinaKey', 'semestreId', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'disciplinaKey', 'semestreId', 'createdAt', 'updatedAt'])
+        && isValidId(data.userId) && data.userId == userId
+        && isValidId(data.disciplinaKey) && data.disciplinaKey == disciplinaKey
+        && data.semestreId is string && data.semestreId.size() >= 1 && data.semestreId.size() <= 32
+        && data.createdAt == request.time
+        && data.updatedAt == request.time;
+    }
+
+    function isValidAvisoColetivo(data, avisoId) {
+      return data.keys().hasAll([
+          'id', 'disciplinaKey', 'disciplinaNome', 'semestreId', 'data', 'tipo',
+          'mensagem', 'autorUid', 'autorNome', 'isOficial', 'confirmacoes', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'disciplinaKey', 'disciplinaNome', 'semestreId', 'data', 'tipo',
+          'mensagem', 'autorUid', 'autorNome', 'isOficial', 'confirmacoes', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id) && data.id == avisoId
+        && isValidId(data.disciplinaKey)
+        && data.disciplinaNome is string && data.disciplinaNome.size() >= 1 && data.disciplinaNome.size() <= 160
+        && data.semestreId is string && data.semestreId.size() >= 1 && data.semestreId.size() <= 32
+        && isValidDateStr(data.data)
+        && data.tipo in ['sem_aula', 'mudanca_sala', 'aviso', 'prova', 'trabalho', 'trabalho_grupo', 'seminario']
+        && data.mensagem is string && data.mensagem.size() >= 2 && data.mensagem.size() <= 240
+        && isValidId(data.autorUid)
+        && data.autorNome is string && data.autorNome.size() >= 1 && data.autorNome.size() <= 80
+        && data.isOficial is bool
+        && data.confirmacoes is number && data.confirmacoes >= 1 && data.confirmacoes <= 100000
+        && data.createdAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function isValidSemAulaConsenso(data, consensoId) {
+      return data.keys().hasAll([
+          'id', 'disciplinaKey', 'disciplinaNome', 'semestreId', 'data', 'votosCount', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'disciplinaKey', 'disciplinaNome', 'semestreId', 'data', 'votosCount', 'ultimoAutorNome', 'updatedAt'
+        ])
+        && isValidId(data.id) && data.id == consensoId
+        && isValidId(data.disciplinaKey)
+        && data.disciplinaNome is string && data.disciplinaNome.size() >= 1 && data.disciplinaNome.size() <= 160
+        && data.semestreId is string && data.semestreId.size() >= 1 && data.semestreId.size() <= 32
+        && isValidDateStr(data.data)
+        && data.votosCount is number && data.votosCount >= 0 && data.votosCount <= 100000
+        && (!('ultimoAutorNome' in data) || (data.ultimoAutorNome is string && data.ultimoAutorNome.size() <= 80))
+        && data.updatedAt == request.time;
+    }
+
+    function isValidSemAulaVoto(data, consensoId, userId) {
+      return data.keys().hasAll(['userId', 'consensoId', 'disciplinaKey', 'data', 'autorNome', 'createdAt'])
+        && data.keys().hasOnly(['userId', 'consensoId', 'disciplinaKey', 'data', 'autorNome', 'createdAt'])
+        && isValidId(data.userId) && data.userId == userId
+        && isValidId(data.consensoId) && data.consensoId == consensoId
+        && isValidId(data.disciplinaKey)
+        && isValidDateStr(data.data)
+        && data.autorNome is string && data.autorNome.size() >= 1 && data.autorNome.size() <= 80
+        && data.createdAt == request.time;
+    }
+
+    // --- Collection Rules ---
+
+    // Shared academic calendar config (/config/semestre_atual)
+    match /config/{configId} {
+      allow get: if isValidId(configId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(configId) && isValidSemestreConfig(incoming());
+      allow update: if isAdmin() && isValidId(configId) && isValidSemestreConfig(incoming());
+      allow delete: if isAdmin() && isValidId(configId);
+    }
+
+    // Shared discipline catalog (/catalogo_disciplinas/{disciplinaId})
+    match /catalogo_disciplinas/{disciplinaId} {
+      allow get: if isValidId(disciplinaId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(disciplinaId) && isValidCatalogoDisciplina(incoming());
+      allow update: if isAdmin() && isValidId(disciplinaId) && isValidCatalogoDisciplina(incoming())
+        && incoming().id == existing().id;
+      allow delete: if isAdmin() && isValidId(disciplinaId);
+    }
+
+    // Shared collective enrollment counters by disciplinaKey (catalogoId or slugify(nome))
+    match /disciplinas_comunidade/{disciplinaKey} {
+      allow get: if isSignedIn() && isValidId(disciplinaKey);
+      allow list: if isAdmin();
+      allow create: if isSignedIn()
+        && isValidId(disciplinaKey)
+        && isValidDisciplinaComunidade(incoming(), disciplinaKey)
+        && incoming().inscritosCount == 1
+        && existsAfter(/databases/$(database)/documents/disciplinas_comunidade/$(disciplinaKey)/inscritos/$(request.auth.uid));
+      allow update: if isSignedIn()
+        && isValidId(disciplinaKey)
+        && isValidDisciplinaComunidade(incoming(), disciplinaKey)
+        && incoming().key == existing().key
+        && incoming().diff(existing()).affectedKeys().hasOnly(['inscritosCount', 'updatedAt'])
+        && (
+          (
+            incoming().inscritosCount == existing().inscritosCount + 1
+            && !exists(/databases/$(database)/documents/disciplinas_comunidade/$(disciplinaKey)/inscritos/$(request.auth.uid))
+            && existsAfter(/databases/$(database)/documents/disciplinas_comunidade/$(disciplinaKey)/inscritos/$(request.auth.uid))
+          )
+          || (
+            incoming().inscritosCount == existing().inscritosCount - 1
+            && exists(/databases/$(database)/documents/disciplinas_comunidade/$(disciplinaKey)/inscritos/$(request.auth.uid))
+            && !existsAfter(/databases/$(database)/documents/disciplinas_comunidade/$(disciplinaKey)/inscritos/$(request.auth.uid))
+          )
+        );
+      allow delete: if isAdmin() && isValidId(disciplinaKey);
+
+      match /inscritos/{userId} {
+        allow get: if isValidId(disciplinaKey) && isValidId(userId) && (isOwner(userId) || isAdmin());
+        allow list: if isAdmin();
+        allow create: if isOwner(userId)
+          && isValidId(disciplinaKey)
+          && isValidId(userId)
+          && isValidInscritoDisciplina(incoming(), disciplinaKey, userId)
+          && (
+            exists(/databases/$(database)/documents/disciplinas_comunidade/$(disciplinaKey))
+            || existsAfter(/databases/$(database)/documents/disciplinas_comunidade/$(disciplinaKey))
+          );
+        allow update: if false;
+        allow delete: if isOwner(userId)
+          && isValidId(disciplinaKey)
+          && isValidId(userId)
+          && exists(/databases/$(database)/documents/disciplinas_comunidade/$(disciplinaKey));
+      }
+    }
+
+    // Shared collective announcements & shared academic events indexed by disciplinaKey
+    match /avisos_coletivos/{avisoId} {
+      allow get: if isSignedIn() && isValidId(avisoId);
+      allow list: if isSignedIn()
+        && resource.data.semestreId is string
+        && resource.data.disciplinaKey is string;
+      allow create: if isSignedIn()
+        && isValidId(avisoId)
+        && isValidAvisoColetivo(incoming(), avisoId)
+        && incoming().autorUid == request.auth.uid
+        && incoming().confirmacoes == 1
+        && (!incoming().isOficial || isAdmin())
+        && incoming().createdAt == request.time
+        && (
+          isAdmin()
+          || exists(/databases/$(database)/documents/disciplinas_comunidade/$(incoming().disciplinaKey)/inscritos/$(request.auth.uid))
+        );
+      allow update: if isSignedIn()
+        && isValidId(avisoId)
+        && isValidAvisoColetivo(incoming(), avisoId)
+        && incoming().id == existing().id
+        && incoming().autorUid == existing().autorUid
+        && incoming().disciplinaKey == existing().disciplinaKey
+        && incoming().createdAt == existing().createdAt
+        && (
+          (
+            incoming().isOficial == existing().isOficial
+            && incoming().diff(existing()).affectedKeys().hasOnly(['confirmacoes', 'updatedAt'])
+            && incoming().confirmacoes == existing().confirmacoes + 1
+            && !exists(/databases/$(database)/documents/avisos_coletivos/$(avisoId)/confirmacoes/$(request.auth.uid))
+            && existsAfter(/databases/$(database)/documents/avisos_coletivos/$(avisoId)/confirmacoes/$(request.auth.uid))
+          )
+          || (
+            (isAdmin() || existing().autorUid == request.auth.uid)
+            && (!incoming().isOficial || isAdmin())
+            && incoming().diff(existing()).affectedKeys().hasOnly(['tipo', 'mensagem', 'data', 'autorNome', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(avisoId)
+        && (isAdmin() || (isSignedIn() && existing().autorUid == request.auth.uid));
+
+      match /confirmacoes/{userId} {
+        allow get: if isValidId(avisoId) && isValidId(userId) && (isOwner(userId) || isAdmin());
+        allow list: if isAdmin();
+        allow create: if isOwner(userId)
+          && isValidId(avisoId)
+          && isValidId(userId)
+          && incoming().keys().hasAll(['userId', 'avisoId', 'createdAt'])
+          && incoming().keys().hasOnly(['userId', 'avisoId', 'createdAt'])
+          && incoming().userId == userId
+          && incoming().avisoId == avisoId
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/avisos_coletivos/$(avisoId));
+        allow update: if false;
+        allow delete: if isAdmin() && isValidId(avisoId) && isValidId(userId);
+      }
+    }
+
+    // Crowd consensus per discipline & date when classmates report "Sem Aula"
+    match /sem_aula_consenso/{consensoId} {
+      allow get: if isSignedIn() && isValidId(consensoId);
+      allow list: if isSignedIn()
+        && resource.data.semestreId is string
+        && resource.data.disciplinaKey is string;
+      allow create: if isSignedIn()
+        && isValidId(consensoId)
+        && isValidSemAulaConsenso(incoming(), consensoId)
+        && incoming().votosCount == 1
+        && existsAfter(/databases/$(database)/documents/sem_aula_consenso/$(consensoId)/votos/$(request.auth.uid));
+      allow update: if isSignedIn()
+        && isValidId(consensoId)
+        && isValidSemAulaConsenso(incoming(), consensoId)
+        && incoming().id == existing().id
+        && incoming().disciplinaKey == existing().disciplinaKey
+        && incoming().semestreId == existing().semestreId
+        && incoming().data == existing().data
+        && incoming().diff(existing()).affectedKeys().hasOnly(['votosCount', 'ultimoAutorNome', 'updatedAt'])
+        && (
+          (
+            incoming().votosCount == existing().votosCount + 1
+            && !exists(/databases/$(database)/documents/sem_aula_consenso/$(consensoId)/votos/$(request.auth.uid))
+            && existsAfter(/databases/$(database)/documents/sem_aula_consenso/$(consensoId)/votos/$(request.auth.uid))
+          )
+          || (
+            incoming().votosCount == existing().votosCount - 1
+            && existing().votosCount >= 1
+            && exists(/databases/$(database)/documents/sem_aula_consenso/$(consensoId)/votos/$(request.auth.uid))
+            && !existsAfter(/databases/$(database)/documents/sem_aula_consenso/$(consensoId)/votos/$(request.auth.uid))
+          )
+        );
+      allow delete: if isAdmin() && isValidId(consensoId);
+
+      match /votos/{userId} {
+        allow get: if isValidId(consensoId) && isValidId(userId) && (isOwner(userId) || isAdmin());
+        allow list: if isAdmin();
+        allow create: if isOwner(userId)
+          && isValidId(consensoId)
+          && isValidId(userId)
+          && isValidSemAulaVoto(incoming(), consensoId, userId)
+          && (
+            exists(/databases/$(database)/documents/sem_aula_consenso/$(consensoId))
+            || existsAfter(/databases/$(database)/documents/sem_aula_consenso/$(consensoId))
+          );
+        allow update: if false;
+        allow delete: if isOwner(userId)
+          && isValidId(consensoId)
+          && isValidId(userId)
+          && exists(/databases/$(database)/documents/sem_aula_consenso/$(consensoId));
+      }
+    }
+
+    // User profile & private subcollections (/users/{userId})
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && (incoming().role == 'student' || isAdmin());
+      allow update: if isValidId(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && (
+          isAdmin()
+          || (
+            isOwner(userId)
+            && incoming().role == existing().role
+            && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'periodoAtual', 'percentualPadrao', 'updatedAt'])
+          )
+        );
+      allow delete: if isAdmin() && isValidId(userId);
+
+      // User's enrolled subjects (/users/{userId}/materias/{materiaId})
+      match /materias/{materiaId} {
+        allow get: if isValidId(userId) && isValidId(materiaId) && (isOwner(userId) || isAdmin());
+        allow list: if isOwner(userId) && resource.data.userId == request.auth.uid;
+        allow create: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(materiaId)
+          && isValidUserMateria(incoming(), userId, materiaId)
+          && incoming().createdAt == request.time;
+        allow update: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(materiaId)
+          && isValidUserMateria(incoming(), userId, materiaId)
+          && incoming().id == existing().id
+          && incoming().userId == existing().userId
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'nome', 'disciplinaKey', 'local', 'periodo', 'horarios', 'regraModo',
+            'cargaHorariaTotal', 'percentualLimite', 'cotaIsoladaPorDia',
+            'encontrosTotaisSemestre', 'updatedAt'
+          ]);
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(materiaId);
+      }
+
+      // User's attendance / absence records (/users/{userId}/faltas/{faltaId})
+      match /faltas/{faltaId} {
+        allow get: if isValidId(userId) && isValidId(faltaId) && (isOwner(userId) || isAdmin());
+        allow list: if isOwner(userId) && resource.data.userId == request.auth.uid;
+        allow create: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(faltaId)
+          && isValidUserFalta(incoming(), userId, faltaId)
+          && incoming().createdAt == request.time
+          && (
+            exists(/databases/$(database)/documents/users/$(userId)/materias/$(incoming().materiaId))
+            || existsAfter(/databases/$(database)/documents/users/$(userId)/materias/$(incoming().materiaId))
+          );
+        allow update: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(faltaId)
+          && isValidUserFalta(incoming(), userId, faltaId)
+          && incoming().id == existing().id
+          && incoming().userId == existing().userId
+          && incoming().materiaId == existing().materiaId
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'data', 'diaSemana', 'horas', 'tipo', 'observacao', 'updatedAt'
+          ]);
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(faltaId);
+      }
+
+      // User's private calendar events (/users/{userId}/eventos/{eventoId})
+      match /eventos/{eventoId} {
+        allow get: if isValidId(userId) && isValidId(eventoId) && (isOwner(userId) || isAdmin());
+        allow list: if isOwner(userId) && resource.data.userId == request.auth.uid;
+        allow create: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(eventoId)
+          && isValidUserEvento(incoming(), userId, eventoId)
+          && incoming().createdAt == request.time
+          && (
+            !('materiaId' in incoming())
+            || exists(/databases/$(database)/documents/users/$(userId)/materias/$(incoming().materiaId))
+            || existsAfter(/databases/$(database)/documents/users/$(userId)/materias/$(incoming().materiaId))
+          );
+        allow update: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(eventoId)
+          && isValidUserEvento(incoming(), userId, eventoId)
+          && incoming().id == existing().id
+          && incoming().userId == existing().userId
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'materiaId', 'disciplinaKey', 'disciplinaNome', 'data', 'tipo',
+            'titulo', 'detalhes', 'grupo', 'horario', 'updatedAt'
+          ]);
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(eventoId);
+      }
+    }
+  }
+}

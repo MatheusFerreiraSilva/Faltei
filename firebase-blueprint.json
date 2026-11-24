@@ -1,0 +1,291 @@
+{
+  "entities": {
+    "SemestreConfig": {
+      "title": "SemestreConfig",
+      "description": "Configuração global do semestre letivo e calendário de feriados.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 32, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "nome": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "dataInicio": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "dataFim": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "feriados": { "type": "array", "description": "Lista de feriados sem aula regular (máximo 60)." },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "updatedBy": { "type": "string", "maxLength": 128 }
+      },
+      "required": ["id", "nome", "dataInicio", "dataFim", "feriados", "updatedAt"]
+    },
+    "CatalogoDisciplina": {
+      "title": "CatalogoDisciplina",
+      "description": "Disciplina oficial do catálogo compartilhado do curso.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "semestreId": { "type": "string", "maxLength": 32 },
+        "nome": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "local": { "type": "string", "maxLength": 160 },
+        "periodo": {
+          "type": "string",
+          "enum": ["1", "2", "3", "4", "5", "6", "7", "8", "optativa"]
+        },
+        "horarios": { "type": "array", "description": "Horários semanais (máximo 7 encontros)." },
+        "divisaoDiferente": { "type": "boolean" },
+        "cargaHorariaTotal": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "semestreId", "nome", "local", "periodo", "horarios", "divisaoDiferente", "cargaHorariaTotal"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Perfil privado do estudante no faltei.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 200 },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["student", "admin"] },
+        "periodoAtual": { "type": "string", "enum": ["1", "2", "3", "4", "5", "6", "7", "8", "optativa"] },
+        "percentualPadrao": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "role", "createdAt", "updatedAt"]
+    },
+    "UserMateria": {
+      "title": "UserMateria",
+      "description": "Disciplina matriculada pelo usuário com regra de cálculo de faltas.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "catalogoId": { "type": "string", "maxLength": 128 },
+        "disciplinaKey": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "semestreId": { "type": "string", "maxLength": 32 },
+        "nome": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "local": { "type": "string", "maxLength": 160 },
+        "periodo": {
+          "type": "string",
+          "enum": ["1", "2", "3", "4", "5", "6", "7", "8", "optativa"]
+        },
+        "horarios": { "type": "array", "description": "Dias da semana e horários (máximo 7)." },
+        "regraModo": {
+          "type": "string",
+          "enum": ["horas_totais", "diferente_por_dia", "por_encontros"]
+        },
+        "cargaHorariaTotal": { "type": "number" },
+        "percentualLimite": { "type": "number" },
+        "cotaIsoladaPorDia": { "type": "boolean" },
+        "encontrosTotaisSemestre": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "userId",
+        "semestreId",
+        "nome",
+        "periodo",
+        "horarios",
+        "regraModo",
+        "cargaHorariaTotal",
+        "percentualLimite",
+        "cotaIsoladaPorDia",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserFalta": {
+      "title": "UserFalta",
+      "description": "Registro de falta ocorrida, falta programada ou aula cancelada (sem aula).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "materiaId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "data": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "diaSemana": { "type": "number" },
+        "horas": { "type": "number" },
+        "tipo": { "type": "string", "enum": ["falta", "programada", "sem_aula"] },
+        "observacao": { "type": "string", "maxLength": 240 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "materiaId", "data", "diaSemana", "horas", "tipo", "createdAt", "updatedAt"]
+    },
+    "DisciplinaComunidade": {
+      "title": "DisciplinaComunidade",
+      "description": "Contagem coletiva de alunos inscritos por chave de disciplina (catalogoId ou slug normalizado).",
+      "type": "object",
+      "properties": {
+        "key": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "semestreId": { "type": "string", "maxLength": 32 },
+        "nome": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "catalogoId": { "type": "string", "maxLength": 128 },
+        "inscritosCount": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["key", "semestreId", "nome", "inscritosCount", "updatedAt"]
+    },
+    "InscritoDisciplina": {
+      "title": "InscritoDisciplina",
+      "description": "Vínculo único por usuário na contagem de inscritos de uma disciplina.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "disciplinaKey": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "semestreId": { "type": "string", "maxLength": 32 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "disciplinaKey", "semestreId", "createdAt", "updatedAt"]
+    },
+    "AvisoColetivo": {
+      "title": "AvisoColetivo",
+      "description": "Aviso coletivo da turma (sem aula, mudança de sala ou comunicado) indexado pela chave da disciplina.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "disciplinaKey": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "disciplinaNome": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "semestreId": { "type": "string", "maxLength": 32 },
+        "data": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "tipo": { "type": "string", "enum": ["sem_aula", "mudanca_sala", "aviso", "prova", "trabalho", "trabalho_grupo", "seminario"] },
+        "mensagem": { "type": "string", "minLength": 2, "maxLength": 240 },
+        "autorUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "autorNome": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "isOficial": { "type": "boolean" },
+        "confirmacoes": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "disciplinaKey",
+        "disciplinaNome",
+        "semestreId",
+        "data",
+        "tipo",
+        "mensagem",
+        "autorUid",
+        "autorNome",
+        "isOficial",
+        "confirmacoes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AvisoConfirmacao": {
+      "title": "AvisoConfirmacao",
+      "description": "Registro único de confirmação de aviso coletivo por aluno.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "avisoId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "avisoId", "createdAt"]
+    },
+    "UserEvento": {
+      "title": "UserEvento",
+      "description": "Evento acadêmico pessoal no calendário do aluno (prova, trabalho, trabalho em grupo, seminário ou sem aula).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "materiaId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "disciplinaKey": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "disciplinaNome": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "semestreId": { "type": "string", "maxLength": 32 },
+        "data": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "tipo": { "type": "string", "enum": ["prova", "trabalho", "trabalho_grupo", "seminario", "sem_aula"] },
+        "titulo": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "detalhes": { "type": "string", "maxLength": 240 },
+        "grupo": { "type": "string", "maxLength": 100 },
+        "horario": { "type": "string", "maxLength": 16 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "disciplinaNome", "semestreId", "data", "tipo", "titulo", "createdAt", "updatedAt"]
+    },
+    "SemAulaConsenso": {
+      "title": "SemAulaConsenso",
+      "description": "Agregado coletivo por disciplina e data indicando quantos alunos marcaram que não houve aula.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "disciplinaKey": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "disciplinaNome": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "semestreId": { "type": "string", "maxLength": 32 },
+        "data": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "votosCount": { "type": "number" },
+        "ultimoAutorNome": { "type": "string", "maxLength": 80 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "disciplinaKey", "disciplinaNome", "semestreId", "data", "votosCount", "updatedAt"]
+    },
+    "SemAulaVoto": {
+      "title": "SemAulaVoto",
+      "description": "Registro único de voto Sem Aula por usuário em uma disciplina e data.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "consensoId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "disciplinaKey": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "data": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "autorNome": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "consensoId", "disciplinaKey", "data", "autorNome", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/config/{configId}": {
+      "schema": { "$ref": "#/entities/SemestreConfig" },
+      "description": "Configuração global do semestre letivo (/config/semestre_atual)."
+    },
+    "/catalogo_disciplinas/{disciplinaId}": {
+      "schema": { "$ref": "#/entities/CatalogoDisciplina" },
+      "description": "Catálogo global de disciplinas extraído do mapa oficial."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Dados de perfil e preferências privadas do usuário."
+    },
+    "/users/{userId}/materias/{materiaId}": {
+      "schema": { "$ref": "#/entities/UserMateria" },
+      "description": "Disciplinas cadastradas pelo usuário."
+    },
+    "/users/{userId}/faltas/{faltaId}": {
+      "schema": { "$ref": "#/entities/UserFalta" },
+      "description": "Registros de faltas ocorridas, programadas e sem aula do usuário."
+    },
+    "/disciplinas_comunidade/{disciplinaKey}": {
+      "schema": { "$ref": "#/entities/DisciplinaComunidade" },
+      "description": "Agregado público sem PII com contagem de inscritos por disciplinaKey (catalogoId ou slug)."
+    },
+    "/disciplinas_comunidade/{disciplinaKey}/inscritos/{userId}": {
+      "schema": { "$ref": "#/entities/InscritoDisciplina" },
+      "description": "Controle de unicidade de inscrição do aluno na disciplina."
+    },
+    "/avisos_coletivos/{avisoId}": {
+      "schema": { "$ref": "#/entities/AvisoColetivo" },
+      "description": "Avisos coletivos compartilhados entre alunos da mesma disciplinaKey."
+    },
+    "/avisos_coletivos/{avisoId}/confirmacoes/{userId}": {
+      "schema": { "$ref": "#/entities/AvisoConfirmacao" },
+      "description": "Registro único de confirmação de aviso coletivo por aluno."
+    },
+    "/users/{userId}/eventos/{eventoId}": {
+      "schema": { "$ref": "#/entities/UserEvento" },
+      "description": "Eventos acadêmicos privados no calendário do aluno (provas, trabalhos, grupos, seminários e sem aula)."
+    },
+    "/sem_aula_consenso/{consensoId}": {
+      "schema": { "$ref": "#/entities/SemAulaConsenso" },
+      "description": "Consenso coletivo por disciplina e data indicando quantos alunos registraram Sem Aula."
+    },
+    "/sem_aula_consenso/{consensoId}/votos/{userId}": {
+      "schema": { "$ref": "#/entities/SemAulaVoto" },
+      "description": "Controle de unicidade do voto Sem Aula por usuário."
+    }
+  }
+}
