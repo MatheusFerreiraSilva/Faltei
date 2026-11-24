@@ -60,7 +60,7 @@ service cloud.firestore {
 
     function isValidCatalogoDisciplina(data) {
       return data.keys().hasAll(['id', 'semestreId', 'nome', 'local', 'periodo', 'horarios', 'divisaoDiferente', 'cargaHorariaTotal'])
-        && data.keys().hasOnly(['id', 'semestreId', 'nome', 'local', 'periodo', 'horarios', 'divisaoDiferente', 'cargaHorariaTotal', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'semestreId', 'nome', 'local', 'periodo', 'horarios', 'blocosAula', 'divisaoDiferente', 'cargaHorariaTotal', 'updatedAt'])
         && isValidId(data.id)
         && data.semestreId is string && data.semestreId.size() >= 1 && data.semestreId.size() <= 32
         && data.nome is string && data.nome.size() >= 2 && data.nome.size() <= 160
@@ -68,6 +68,7 @@ service cloud.firestore {
         && isValidPeriodo(data.periodo)
         && data.horarios is list && data.horarios.size() >= 1 && data.horarios.size() <= 7
         && data.horarios[0] is map
+        && (!('blocosAula' in data) || (data.blocosAula is list && data.blocosAula.size() <= 14))
         && data.divisaoDiferente is bool
         && data.cargaHorariaTotal is number && data.cargaHorariaTotal >= 1 && data.cargaHorariaTotal <= 1000
         && (!('updatedAt' in data) || data.updatedAt == request.time);
@@ -93,7 +94,7 @@ service cloud.firestore {
           'createdAt', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'id', 'userId', 'catalogoId', 'disciplinaKey', 'semestreId', 'nome', 'local', 'periodo', 'horarios',
+          'id', 'userId', 'catalogoId', 'disciplinaKey', 'semestreId', 'nome', 'local', 'periodo', 'horarios', 'blocosAula',
           'regraModo', 'cargaHorariaTotal', 'percentualLimite', 'cotaIsoladaPorDia',
           'encontrosTotaisSemestre', 'createdAt', 'updatedAt'
         ])
@@ -107,6 +108,7 @@ service cloud.firestore {
         && isValidPeriodo(data.periodo)
         && data.horarios is list && data.horarios.size() >= 1 && data.horarios.size() <= 7
         && data.horarios[0] is map
+        && (!('blocosAula' in data) || (data.blocosAula is list && data.blocosAula.size() <= 14))
         && data.regraModo in ['horas_totais', 'diferente_por_dia', 'por_encontros']
         && data.cargaHorariaTotal is number && data.cargaHorariaTotal >= 1 && data.cargaHorariaTotal <= 1000
         && data.percentualLimite is number && data.percentualLimite >= 1 && data.percentualLimite <= 99
@@ -121,7 +123,8 @@ service cloud.firestore {
           'id', 'userId', 'materiaId', 'data', 'diaSemana', 'horas', 'tipo', 'createdAt', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'id', 'userId', 'materiaId', 'data', 'diaSemana', 'horas', 'tipo', 'observacao', 'createdAt', 'updatedAt'
+          'id', 'userId', 'materiaId', 'data', 'diaSemana', 'horas', 'tipo',
+          'tipoFalta', 'horasAbatidas', 'blocoId', 'observacao', 'createdAt', 'updatedAt'
         ])
         && isValidId(data.id) && data.id == faltaId
         && isValidId(data.userId) && data.userId == userId
@@ -130,6 +133,9 @@ service cloud.firestore {
         && data.diaSemana is number && data.diaSemana >= 1 && data.diaSemana <= 6
         && data.horas is number && data.horas >= 0.5 && data.horas <= 24
         && data.tipo in ['falta', 'programada', 'sem_aula']
+        && (!('tipoFalta' in data) || data.tipoFalta in ['dia_completo', 'turno_manha', 'turno_tarde', 'turno_noite', 'parcial'])
+        && (!('horasAbatidas' in data) || (data.horasAbatidas is number && data.horasAbatidas >= 0.5 && data.horasAbatidas <= 24))
+        && (!('blocoId' in data) || isValidId(data.blocoId))
         && (!('observacao' in data) || (data.observacao is string && data.observacao.size() <= 240))
         && data.createdAt is timestamp
         && data.updatedAt == request.time;
@@ -177,6 +183,31 @@ service cloud.firestore {
         && isValidId(data.disciplinaKey) && data.disciplinaKey == disciplinaKey
         && data.semestreId is string && data.semestreId.size() >= 1 && data.semestreId.size() <= 32
         && data.createdAt == request.time
+        && data.updatedAt == request.time;
+    }
+
+    function isValidEventoColetivoDisciplina(data, disciplinaKey, eventKey) {
+      return data.keys().hasAll([
+          'id', 'disciplinaKey', 'disciplinaNome', 'semestreId', 'data', 'tipo',
+          'titulo', 'autorUid', 'autorNome', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'disciplinaKey', 'disciplinaNome', 'semestreId', 'data', 'tipo',
+          'titulo', 'detalhes', 'grupo', 'horario', 'autorUid', 'autorNome', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id) && data.id == eventKey
+        && isValidId(data.disciplinaKey) && data.disciplinaKey == disciplinaKey
+        && data.disciplinaNome is string && data.disciplinaNome.size() >= 1 && data.disciplinaNome.size() <= 160
+        && data.semestreId is string && data.semestreId.size() >= 1 && data.semestreId.size() <= 32
+        && isValidDateStr(data.data)
+        && data.tipo in ['prova', 'trabalho', 'trabalho_grupo', 'seminario', 'sem_aula', 'aviso']
+        && data.titulo is string && data.titulo.size() >= 2 && data.titulo.size() <= 160
+        && (!('detalhes' in data) || (data.detalhes is string && data.detalhes.size() <= 240))
+        && (!('grupo' in data) || (data.grupo is string && data.grupo.size() <= 100))
+        && (!('horario' in data) || (data.horario is string && data.horario.size() <= 16))
+        && isValidId(data.autorUid)
+        && data.autorNome is string && data.autorNome.size() >= 1 && data.autorNome.size() <= 80
+        && data.createdAt is timestamp
         && data.updatedAt == request.time;
     }
 
@@ -236,8 +267,8 @@ service cloud.firestore {
 
     // Shared academic calendar config (/config/semestre_atual)
     match /config/{configId} {
-      allow get: if isValidId(configId);
-      allow list: if true;
+      allow get: if isSignedIn() && isValidId(configId);
+      allow list: if isSignedIn() && resource.data.id is string;
       allow create: if isAdmin() && isValidId(configId) && isValidSemestreConfig(incoming());
       allow update: if isAdmin() && isValidId(configId) && isValidSemestreConfig(incoming());
       allow delete: if isAdmin() && isValidId(configId);
@@ -245,8 +276,8 @@ service cloud.firestore {
 
     // Shared discipline catalog (/catalogo_disciplinas/{disciplinaId})
     match /catalogo_disciplinas/{disciplinaId} {
-      allow get: if isValidId(disciplinaId);
-      allow list: if true;
+      allow get: if isSignedIn() && isValidId(disciplinaId);
+      allow list: if isSignedIn() && resource.data.id is string;
       allow create: if isAdmin() && isValidId(disciplinaId) && isValidCatalogoDisciplina(incoming());
       allow update: if isAdmin() && isValidId(disciplinaId) && isValidCatalogoDisciplina(incoming())
         && incoming().id == existing().id;
@@ -297,6 +328,35 @@ service cloud.firestore {
           && isValidId(disciplinaKey)
           && isValidId(userId)
           && exists(/databases/$(database)/documents/disciplinas_comunidade/$(disciplinaKey));
+      }
+
+      match /eventos_coletivos/{eventKey} {
+        allow get: if isSignedIn() && isValidId(disciplinaKey) && isValidId(eventKey);
+        allow list: if isSignedIn()
+          && isValidId(disciplinaKey)
+          && resource.data.autorUid is string;
+        allow create: if isSignedIn()
+          && isValidId(disciplinaKey)
+          && isValidId(eventKey)
+          && isValidEventoColetivoDisciplina(incoming(), disciplinaKey, eventKey)
+          && incoming().autorUid == request.auth.uid
+          && incoming().createdAt == request.time;
+        allow update: if isSignedIn()
+          && isValidId(disciplinaKey)
+          && isValidId(eventKey)
+          && (isAdmin() || existing().autorUid == request.auth.uid)
+          && isValidEventoColetivoDisciplina(incoming(), disciplinaKey, eventKey)
+          && incoming().id == existing().id
+          && incoming().disciplinaKey == existing().disciplinaKey
+          && incoming().autorUid == existing().autorUid
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'disciplinaNome', 'data', 'tipo', 'titulo', 'detalhes',
+            'grupo', 'horario', 'autorNome', 'updatedAt'
+          ]);
+        allow delete: if isValidId(disciplinaKey)
+          && isValidId(eventKey)
+          && (isAdmin() || (isSignedIn() && existing().autorUid == request.auth.uid));
       }
     }
 
@@ -451,7 +511,7 @@ service cloud.firestore {
           && incoming().userId == existing().userId
           && incoming().createdAt == existing().createdAt
           && incoming().diff(existing()).affectedKeys().hasOnly([
-            'nome', 'disciplinaKey', 'local', 'periodo', 'horarios', 'regraModo',
+            'nome', 'disciplinaKey', 'local', 'periodo', 'horarios', 'blocosAula', 'regraModo',
             'cargaHorariaTotal', 'percentualLimite', 'cotaIsoladaPorDia',
             'encontrosTotaisSemestre', 'updatedAt'
           ]);
@@ -480,7 +540,7 @@ service cloud.firestore {
           && incoming().materiaId == existing().materiaId
           && incoming().createdAt == existing().createdAt
           && incoming().diff(existing()).affectedKeys().hasOnly([
-            'data', 'diaSemana', 'horas', 'tipo', 'observacao', 'updatedAt'
+            'data', 'diaSemana', 'horas', 'tipo', 'tipoFalta', 'horasAbatidas', 'blocoId', 'observacao', 'updatedAt'
           ]);
         allow delete: if isOwner(userId) && isValidId(userId) && isValidId(faltaId);
       }

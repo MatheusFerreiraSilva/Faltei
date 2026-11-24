@@ -1,4 +1,5 @@
 import { CatalogoDisciplina, SemestreConfig } from '../types/domain';
+import { normalizeBlocosFromHorarios } from '../utils/attendance';
 
 export const SEMESTRE_2026_2: SemestreConfig = {
   id: '2026.2',
@@ -14,7 +15,7 @@ export const SEMESTRE_2026_2: SemestreConfig = {
   ],
 };
 
-export const CATALOGO_2026_2: CatalogoDisciplina[] = [
+const RAW_CATALOGO_2026_2: CatalogoDisciplina[] = [
   // ================= 1º PERÍODO (7 disciplinas — 535h) =================
   {
     id: 'unirio_2026_2_p1_fund_biologicos',
@@ -978,3 +979,8 @@ export const CATALOGO_2026_2: CatalogoDisciplina[] = [
     cargaHorariaTotal: 32,
   },
 ];
+
+export const CATALOGO_2026_2: CatalogoDisciplina[] = RAW_CATALOGO_2026_2.map((item) => ({
+  ...item,
+  blocosAula: normalizeBlocosFromHorarios(item.horarios, item.local, item.id),
+}));

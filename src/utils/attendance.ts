@@ -1,7 +1,9 @@
 import {
+  BlocoAula,
   CatalogDiffItem,
   CatalogoDisciplina,
   DiaSemana,
+  FaltaDetalheTipo,
   Feriado,
   HorarioAula,
   MateriaStats,
@@ -11,6 +13,7 @@ import {
   SimulacaoItem,
   SimulacaoResultado,
   SubCotaDia,
+  TurnoAula,
   UserFalta,
   UserMateria,
 } from '../types/domain';
@@ -249,6 +252,225 @@ export function getComicAlertByStatus(
   }
 }
 
+export function inferTurnoFromHorario(horarioInicio: string): TurnoAula {
+  const [hhStr, mmStr] = horarioInicio.split(':');
+  const minutes = (Number(hhStr) || 8) * 60 + (Number(mmStr) || 0);
+  if (minutes < 12 * 60) return 'manha';
+  if (minutes < 18 * 60) return 'tarde';
+  return 'noite';
+}
+
+export function normalizeBlocosFromHorarios(
+  horarios: HorarioAula[],
+  defaultLocal = '',
+  idPrefix = 'blk'
+): BlocoAula[] {
+  const blocos: BlocoAula[] = [];
+  horarios.forEach((h, idx) => {
+    const loc = h.local || defaultLocal || '';
+    const tag = (h.modalidadeTag || '').toLowerCase();
+
+    // Split combined morning+afternoon catalog slots into distinct turn blocks
+    if (tag.includes('2h m') && tag.includes('4h t') && h.horas === 6) {
+      const mStart = h.horarioInicio || '08:00';
+      const mEnd = mStart === '10:00' ? '12:00' : '10:00';
+      blocos.push({
+        id: `${idPrefix}_${h.diaSemana}_manha_${idx}`,
+        diaSemana: h.diaSemana,
+        turno: 'manha',
+        horarioInicio: mStart,
+        horarioFim: mEnd,
+        horas: 2,
+        local: loc,
+        modalidadeTag: 'Manhã (2h)',
+      });
+      blocos.push({
+        id: `${idPrefix}_${h.diaSemana}_tarde_${idx}`,
+        diaSemana: h.diaSemana,
+        turno: 'tarde',
+        horarioInicio: '13:00',
+        horarioFim: h.horarioFim || '17:00',
+        horas: 4,
+        local: loc,
+        modalidadeTag: 'Tarde (4h)',
+      });
+      return;
+    }
+
+    if (tag.includes('2h m') && tag.includes('1h t') && h.horas === 3) {
+      blocos.push({
+        id: `${idPrefix}_${h.diaSemana}_manha_${idx}`,
+        diaSemana: h.diaSemana,
+        turno: 'manha',
+        horarioInicio: h.horarioInicio || '08:00',
+        horarioFim: '10:00',
+        horas: 2,
+        local: loc.includes('(M)') ? 'Anf. 1 Gabizo' : loc,
+        modalidadeTag: 'Manhã (2h)',
+      });
+      blocos.push({
+        id: `${idPrefix}_${h.diaSemana}_tarde_${idx}`,
+        diaSemana: h.diaSemana,
+        turno: 'tarde',
+        horarioInicio: '15:00',
+        horarioFim: h.horarioFim || '16:00',
+        horas: 1,
+        local: loc.includes('(T)') ? 'Anf. Geral HUGG' : loc,
+        modalidadeTag: 'Tarde (1h)',
+      });
+      return;
+    }
+
+    const turno = inferTurnoFromHorario(h.horarioInicio);
+    blocos.push({
+      id: `${idPrefix}_${h.diaSemana}_${turno}_${h.horarioInicio.replace(':', '')}_${idx}`,
+      diaSemana: h.diaSemana,
+      turno,
+      horarioInicio: h.horarioInicio,
+      horarioFim: h.horarioFim,
+      horas: h.horas,
+      local: loc,
+      ...(h.modalidadeTag ? { modalidadeTag: h.modalidadeTag } : {}),
+    });
+  });
+
+  return blocos.sort(
+    (a, b) => a.diaSemana - b.diaSemana || a.horarioInicio.localeCompare(b.horarioInicio)
+  );
+}
+
+export function getMateriaBlocos(materia: Pick<UserMateria, 'id' | 'local' | 'horarios' | 'blocosAula'>): BlocoAula[] {
+  if (materia.blocosAula && materia.blocosAula.length > 0) {
+    return [...materia.blocosAula].sort(
+      (a, b) => a.diaSemana - b.diaSemana || a.horarioInicio.localeCompare(b.horarioInicio)
+    );
+  }
+  return normalizeBlocosFromHorarios(materia.horarios || [], materia.local || '', materia.id || 'blk');
+}
+
+export function getEffectiveFaltaHoras(falta: Pick<UserFalta, 'horas' | 'horasAbatidas'>): number {
+  return typeof falta.horasAbatidas === 'number' && falta.horasAbatidas > 0
+    ? falta.horasAbatidas
+    : falta.horas;
+}
+
+export interface WeekdayLoad {
+  diaSemana: DiaSemana;
+  label: string;
+  totalHoras: number;
+  blocos: BlocoAula[];
+}
+
+export function getWeekdayBlockLoads(materia: Pick<UserMateria, 'id' | 'local' | 'horarios' | 'blocosAula'>): WeekdayLoad[] {
+  const blocos = getMateriaBlocos(materia);
+  const byDay = new Map<DiaSemana, BlocoAula[]>();
+  for (const b of blocos) {
+    const arr = byDay.get(b.diaSemana) || [];
+    arr.push(b);
+    byDay.set(b.diaSemana, arr);
+  }
+  return Array.from(byDay.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([diaSemana, dayBlocos]) => {
+      const totalHoras = round2(dayBlocos.reduce((s, b) => s + b.horas, 0));
+      const customTag = dayBlocos.length === 1 && dayBlocos[0].modalidadeTag && !dayBlocos[0].modalidadeTag.startsWith('Manhã') && !dayBlocos[0].modalidadeTag.startsWith('Tarde')
+        ? dayBlocos[0].modalidadeTag
+        : undefined;
+      return {
+        diaSemana,
+        label: customTag || DIA_SEMANA_LABELS[diaSemana].short,
+        totalHoras,
+        blocos: dayBlocos,
+      };
+    });
+}
+
+export interface DayAttendanceOption {
+  tipoFalta: FaltaDetalheTipo;
+  label: string;
+  shortLabel: string;
+  horasAbatidas: number;
+  blocoId?: string;
+}
+
+export interface DayAttendanceSummary {
+  diaSemana: DiaSemana;
+  blocosNoDia: BlocoAula[];
+  totalHorasDia: number;
+  hasTurnosDistintos: boolean;
+  maxParcialHoras: number;
+  options: DayAttendanceOption[];
+}
+
+export function getDayAttendanceOptions(
+  materia: Pick<UserMateria, 'id' | 'local' | 'horarios' | 'blocosAula'>,
+  isoDate: string
+): DayAttendanceSummary {
+  const rawDow = getDiaSemanaFromIso(isoDate);
+  const allBlocos = getMateriaBlocos(materia);
+  const fallbackDow = allBlocos[0]?.diaSemana || 1;
+  const diaSemana = (rawDow >= 1 && rawDow <= 6 ? rawDow : fallbackDow) as DiaSemana;
+
+  let blocosNoDia = allBlocos.filter((b) => b.diaSemana === diaSemana);
+  if (blocosNoDia.length === 0 && allBlocos.length > 0) {
+    blocosNoDia = [allBlocos[0]];
+  }
+
+  const totalHorasDia = Math.max(
+    0.5,
+    round2(blocosNoDia.reduce((sum, b) => sum + b.horas, 0))
+  );
+
+  const byTurno = new Map<TurnoAula, BlocoAula[]>();
+  for (const b of blocosNoDia) {
+    const arr = byTurno.get(b.turno) || [];
+    arr.push(b);
+    byTurno.set(b.turno, arr);
+  }
+
+  const hasTurnosDistintos = byTurno.size >= 2;
+  const options: DayAttendanceOption[] = [
+    {
+      tipoFalta: 'dia_completo',
+      label: `Dia Completo (${formatNumberClean(totalHorasDia)}h)`,
+      shortLabel: `Dia todo (${formatNumberClean(totalHorasDia)}h)`,
+      horasAbatidas: totalHorasDia,
+    },
+  ];
+
+  if (hasTurnosDistintos) {
+    const turnoMeta: Array<{ turno: TurnoAula; tipoFalta: FaltaDetalheTipo; label: string }> = [
+      { turno: 'manha', tipoFalta: 'turno_manha', label: 'Só Manhã' },
+      { turno: 'tarde', tipoFalta: 'turno_tarde', label: 'Só Tarde' },
+      { turno: 'noite', tipoFalta: 'turno_noite', label: 'Só Noite' },
+    ];
+    for (const tm of turnoMeta) {
+      const turnoBlocos = byTurno.get(tm.turno);
+      if (turnoBlocos && turnoBlocos.length > 0) {
+        const hrs = round2(turnoBlocos.reduce((s, b) => s + b.horas, 0));
+        options.push({
+          tipoFalta: tm.tipoFalta,
+          label: `${tm.label} (${formatNumberClean(hrs)}h)`,
+          shortLabel: `${tm.label} (${formatNumberClean(hrs)}h)`,
+          horasAbatidas: hrs,
+          blocoId: turnoBlocos[0].id,
+        });
+      }
+    }
+  }
+
+  const maxParcialHoras = Math.max(1, Math.floor(totalHorasDia) - 1);
+
+  return {
+    diaSemana,
+    blocosNoDia,
+    totalHorasDia,
+    hasTurnosDistintos,
+    maxParcialHoras,
+    options,
+  };
+}
+
 function buildHumanTranslation(
   materia: UserMateria,
   restanteLivre: number,
@@ -272,29 +494,30 @@ function buildHumanTranslation(
     const resumoDias = subCotas
       .map((s) => {
         const aulas = Math.max(0, Math.floor(s.restantesHoras / Math.max(0.5, s.horasPorEncontro)));
-        return `${s.label}: ${formatNumberClean(s.restantesHoras)}h (${aulas} aula${aulas === 1 ? '' : 's'})`;
+        return `${s.label}: ${formatNumberClean(s.restantesHoras)}h (${aulas} falta${aulas === 1 ? '' : 's'})`;
       })
       .join(' · ');
     return `${resumoDias} · Faltam ${aulasRestantesSemestre} aulas`;
   }
 
-  const horasBase = materia.horarios[0]?.horas || 2;
-  const todasIguais = materia.horarios.every((h) => h.horas === horasBase);
+  const dayLoads = getWeekdayBlockLoads(materia);
+  const horasBase = dayLoads[0]?.totalHoras || materia.horarios[0]?.horas || 2;
+  const todasIguais = dayLoads.length <= 1 || dayLoads.every((d) => d.totalHoras === horasBase);
 
   if (todasIguais) {
-    const qtdAulas = Math.floor(restanteLivre / horasBase);
+    const qtdAulas = Math.floor(restanteLivre / Math.max(0.5, horasBase));
     return `Restam ${formatNumberClean(restanteLivre)}h livres · Equivale a ${qtdAulas} ${
       qtdAulas === 1 ? 'aula' : 'aulas'
     } de ${formatNumberClean(horasBase)}h`;
   }
 
-  const detalhes = materia.horarios
-    .map((h) => {
-      const qtd = Math.floor(restanteLivre / Math.max(0.5, h.horas));
-      return `${qtd}× ${DIA_SEMANA_LABELS[h.diaSemana].short} (${formatNumberClean(h.horas)}h)`;
+  const detalhes = dayLoads
+    .map((d) => {
+      const qtd = Math.floor(restanteLivre / Math.max(0.5, d.totalHoras));
+      return `${qtd} ${qtd === 1 ? 'falta' : 'faltas'} de ${DIA_SEMANA_LABELS[d.diaSemana].short} (${formatNumberClean(d.totalHoras)}h)`;
     })
     .join(' ou ');
-  return `Restam ${formatNumberClean(restanteLivre)}h livres · Equivale a ${detalhes}`;
+  return `Saldo: ${formatNumberClean(restanteLivre)}h livres = até ${detalhes}`;
 }
 
 export function calculateMateriaStats(
@@ -370,12 +593,16 @@ export function calculateMateriaStats(
   }
 
   // Modo horas_totais ou diferente_por_dia
-  const horasSemAula = aulasCanceladas.reduce((acc, f) => acc + f.horas, 0);
+  const horasSemAula = aulasCanceladas.reduce((acc, f) => acc + getEffectiveFaltaHoras(f), 0);
   const cargaEfetiva = Math.max(1, materia.cargaHorariaTotal - horasSemAula);
   const limiteTotal = round2((cargaEfetiva * pctLimite) / 100);
 
-  const consumidoConfirmado = round2(faltasConfirmadas.reduce((acc, f) => acc + f.horas, 0));
-  const consumidoProgramado = round2(faltasProgramadas.reduce((acc, f) => acc + f.horas, 0));
+  const consumidoConfirmado = round2(
+    faltasConfirmadas.reduce((acc, f) => acc + getEffectiveFaltaHoras(f), 0)
+  );
+  const consumidoProgramado = round2(
+    faltasProgramadas.reduce((acc, f) => acc + getEffectiveFaltaHoras(f), 0)
+  );
   const consumidoTotal = round2(consumidoConfirmado + consumidoProgramado);
 
   const restanteRaw = round2(limiteTotal - consumidoTotal);
@@ -386,32 +613,38 @@ export function calculateMateriaStats(
   let worstSubPct = 0;
   let worstSubRemainingMeetings = Infinity;
 
+  const dayLoads = getWeekdayBlockLoads(materia);
+
   if (materia.regraModo === 'diferente_por_dia') {
     const countsByDay = countMeetingsByWeekday(materia.horarios, semestre);
-    subCotasPorDia = materia.horarios.map((h) => {
+    subCotasPorDia = dayLoads.map((dl) => {
       const dayCancelHoras = aulasCanceladas
-        .filter((f) => f.diaSemana === h.diaSemana)
-        .reduce((a, b) => a + b.horas, 0);
-      const dayMeetings = countsByDay[h.diaSemana] || 1;
-      const dayTotalHoras = Math.max(h.horas, dayMeetings * h.horas - dayCancelHoras);
+        .filter((f) => f.diaSemana === dl.diaSemana)
+        .reduce((a, b) => a + getEffectiveFaltaHoras(b), 0);
+      const dayMeetings = countsByDay[dl.diaSemana] || 1;
+      const dayTotalHoras = Math.max(dl.totalHoras, dayMeetings * dl.totalHoras - dayCancelHoras);
       const dayLimite = round2((dayTotalHoras * pctLimite) / 100);
       const dayUsadas = round2(
-        faltasConfirmadas.filter((f) => f.diaSemana === h.diaSemana).reduce((a, b) => a + b.horas, 0)
+        faltasConfirmadas
+          .filter((f) => f.diaSemana === dl.diaSemana)
+          .reduce((a, b) => a + getEffectiveFaltaHoras(b), 0)
       );
       const dayProg = round2(
-        faltasProgramadas.filter((f) => f.diaSemana === h.diaSemana).reduce((a, b) => a + b.horas, 0)
+        faltasProgramadas
+          .filter((f) => f.diaSemana === dl.diaSemana)
+          .reduce((a, b) => a + getEffectiveFaltaHoras(b), 0)
       );
       const dayConsumido = round2(dayUsadas + dayProg);
       const dayRest = Math.max(0, round2(dayLimite - dayConsumido));
       const dayPct = dayLimite > 0 ? round2((dayConsumido / dayLimite) * 100) : 100;
-      const dayMeetingsLeft = Math.floor(dayRest / Math.max(0.5, h.horas));
+      const dayMeetingsLeft = Math.floor(dayRest / Math.max(0.5, dl.totalHoras));
       if (dayPct > worstSubPct) worstSubPct = dayPct;
       if (dayMeetingsLeft < worstSubRemainingMeetings) worstSubRemainingMeetings = dayMeetingsLeft;
 
       return {
-        diaSemana: h.diaSemana,
-        label: h.modalidadeTag || DIA_SEMANA_LABELS[h.diaSemana].short,
-        horasPorEncontro: h.horas,
+        diaSemana: dl.diaSemana,
+        label: dl.label,
+        horasPorEncontro: dl.totalHoras,
         limiteHoras: dayLimite,
         usadasHoras: dayUsadas,
         programadasHoras: dayProg,
@@ -421,7 +654,9 @@ export function calculateMateriaStats(
     });
   }
 
-  const minHorasPorAula = Math.min(...materia.horarios.map((h) => h.horas || 2));
+  const minHorasPorAula = Math.min(
+    ...(dayLoads.length > 0 ? dayLoads.map((d) => d.totalHoras || 2) : [2])
+  );
   const encontrosRestantesGlobal = Math.floor(restanteLivre / Math.max(0.5, minHorasPorAula));
 
   const effectivePct =
@@ -565,12 +800,14 @@ export function simulateAbsenceRange(
   const itens: SimulacaoItem[] = [];
 
   for (const mat of materias) {
+    const blocos = getMateriaBlocos(mat);
     const datasAfetadas: { data: string; diaSemana: DiaSemana; horas: number }[] = [];
     for (const d of diasUteisSelecionados) {
       const dow = getDiaSemanaFromIso(d) as DiaSemana;
-      const horarioDia = mat.horarios.find((h) => h.diaSemana === dow);
-      if (horarioDia && !existingKeys.has(`${mat.id}__${d}`)) {
-        datasAfetadas.push({ data: d, diaSemana: dow, horas: horarioDia.horas });
+      const blocosDia = blocos.filter((b) => b.diaSemana === dow);
+      const horasDia = round2(blocosDia.reduce((sum, b) => sum + b.horas, 0));
+      if (blocosDia.length > 0 && horasDia > 0 && !existingKeys.has(`${mat.id}__${d}`)) {
+        datasAfetadas.push({ data: d, diaSemana: dow, horas: horasDia });
       }
     }
 
@@ -584,11 +821,13 @@ export function simulateAbsenceRange(
       data: item.data,
       diaSemana: item.diaSemana,
       horas: item.horas,
+      horasAbatidas: item.horas,
+      tipoFalta: 'dia_completo',
       tipo: 'programada',
     }));
 
     const depois = calculateMateriaStats(mat, [...faltas, ...simulatedFaltas], semestre, referenceDateStr);
-    const horasSimuladas = datasAfetadas.reduce((a, b) => a + b.horas, 0);
+    const horasSimuladas = round2(datasAfetadas.reduce((a, b) => a + b.horas, 0));
 
     itens.push({
       materia: mat,

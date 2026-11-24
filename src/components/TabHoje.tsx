@@ -20,6 +20,7 @@ import {
   AvisoColetivoTipo,
   DiaSemana,
   DisciplinaComunidade,
+  FaltaDetalheTipo,
   FaltaTipo,
   MateriaStats,
   PeriodoId,
@@ -34,8 +35,11 @@ import {
   DIA_SEMANA_LABELS,
   formatDatePtBr,
   formatNumberClean,
+  getDayAttendanceOptions,
   getDiaSemanaFromIso,
   getDynamicHeroGreeting,
+  getEffectiveFaltaHoras,
+  getMateriaBlocos,
   getPeriodoStyle,
   getWeekDatesIso,
   getWeeksRemaining,
@@ -48,6 +52,7 @@ import {
   resolveDisciplinaKey,
 } from '../utils/disciplinaKey';
 import { CumpliceIcon, CumpliceMood } from './CumpliceIcon';
+import { SmartFaltaSelector } from './SmartFaltaSelector';
 
 interface TabHojeProps {
   todayStr: string;
@@ -69,6 +74,9 @@ interface TabHojeProps {
     diaSemana: DiaSemana;
     horas: number;
     tipo: FaltaTipo;
+    tipoFalta?: FaltaDetalheTipo;
+    horasAbatidas?: number;
+    blocoId?: string;
   }) => Promise<void>;
   onDeleteFalta: (faltaId: string) => Promise<void>;
   onImportPeriodo: (periodo: PeriodoId) => Promise<number>;
@@ -81,6 +89,7 @@ interface TabHojeProps {
   onConfirmAviso: (avisoId: string) => Promise<void>;
   onDeleteAviso: (avisoId: string) => Promise<void>;
   onOpenCalendario: () => void;
+  onOpenGradeSemanal: () => void;
   onOpenCalendarioDate: (isoDate: string) => void;
   onOpenSimulador: () => void;
   onOpenGrade: () => void;
@@ -110,6 +119,7 @@ export const TabHoje: React.FC<TabHojeProps> = ({
   onConfirmAviso,
   onDeleteAviso,
   onOpenCalendario,
+  onOpenGradeSemanal,
   onOpenCalendarioDate,
   onOpenSimulador,
   onOpenGrade,
@@ -172,26 +182,33 @@ export const TabHoje: React.FC<TabHojeProps> = ({
     if (selectedDow === 0 || selectedHoliday) return [];
     const list: Array<{
       materia: UserMateria;
+      horarioResumo: string;
       horarioInicio: string;
-      horarioFim: string;
       horas: number;
       local?: string;
-      registro?: UserFalta;
+      registros: UserFalta[];
       stats?: MateriaStats;
     }> = [];
 
     const statsMap = new Map(statsList.map((s) => [s.materia.id, s]));
     for (const mat of materias) {
-      const h = mat.horarios.find((item) => item.diaSemana === selectedDow);
-      if (h) {
-        const reg = faltas.find((f) => f.materiaId === mat.id && f.data === selectedDayStr);
+      const dayBlocos = getMateriaBlocos(mat).filter((item) => item.diaSemana === selectedDow);
+      if (dayBlocos.length > 0) {
+        const totalHoras = dayBlocos.reduce((s, b) => s + b.horas, 0);
+        const regs = faltas.filter((f) => f.materiaId === mat.id && f.data === selectedDayStr);
+        const horarioResumo = dayBlocos
+          .map((b) => `${b.horarioInicio}–${b.horarioFim}`)
+          .join(' · ');
+        const locaisUnicos = Array.from(
+          new Set(dayBlocos.map((b) => b.local || mat.local).filter(Boolean))
+        ).join(' / ');
         list.push({
           materia: mat,
-          horarioInicio: h.horarioInicio,
-          horarioFim: h.horarioFim,
-          horas: h.horas,
-          local: h.local || mat.local,
-          registro: reg,
+          horarioResumo,
+          horarioInicio: dayBlocos[0].horarioInicio,
+          horas: totalHoras,
+          local: locaisUnicos || mat.local,
+          registros: regs,
           stats: statsMap.get(mat.id),
         });
       }
@@ -203,7 +220,7 @@ export const TabHoje: React.FC<TabHojeProps> = ({
     if (selectedHoliday || (selectedDayStr !== todayStr && aulasDoDia.length === 0)) {
       return 'sem_aula';
     }
-    if (aulasDoDia.some((a) => a.registro?.tipo === 'programada')) {
+    if (aulasDoDia.some((a) => a.registros.some((r) => r.tipo === 'programada'))) {
       return 'programado';
     }
     return heroMood;
@@ -212,7 +229,9 @@ export const TabHoje: React.FC<TabHojeProps> = ({
   const handleQuickAction = async (
     materiaId: string,
     horas: number,
-    tipo: FaltaTipo
+    tipo: FaltaTipo,
+    tipoFalta: FaltaDetalheTipo = 'dia_completo',
+    blocoId?: string
   ) => {
     if (selectedDow < 1 || selectedDow > 6) return;
     setBusyId(`${materiaId}_${tipo}`);
@@ -223,6 +242,9 @@ export const TabHoje: React.FC<TabHojeProps> = ({
         diaSemana: selectedDow as DiaSemana,
         horas,
         tipo,
+        tipoFalta,
+        horasAbatidas: horas,
+        ...(blocoId ? { blocoId } : {}),
       });
     } finally {
       setBusyId(null);
@@ -260,15 +282,15 @@ export const TabHoje: React.FC<TabHojeProps> = ({
   const handleApplySemAulaFromAviso = async (aviso: AvisoColetivo) => {
     const mat = materias.find((m) => resolveDisciplinaKey(m) === aviso.disciplinaKey);
     if (!mat) return;
-    const rawDow = getDiaSemanaFromIso(aviso.data);
-    const dow = (rawDow >= 1 && rawDow <= 6 ? rawDow : mat.horarios[0]?.diaSemana || 1) as DiaSemana;
-    const horarioMatch = mat.horarios.find((h) => h.diaSemana === dow) || mat.horarios[0];
+    const summary = getDayAttendanceOptions(mat, aviso.data);
     await onRecordFalta({
       materiaId: mat.id,
       data: aviso.data,
-      diaSemana: dow,
-      horas: horarioMatch?.horas || 2,
+      diaSemana: summary.diaSemana,
+      horas: summary.totalHorasDia,
       tipo: 'sem_aula',
+      tipoFalta: 'dia_completo',
+      horasAbatidas: summary.totalHorasDia,
     });
   };
 
@@ -428,7 +450,8 @@ export const TabHoje: React.FC<TabHojeProps> = ({
           <div className="space-y-3">
             {aulasDoDia.map((aula) => {
               const style = getPeriodoStyle(aula.materia.periodo);
-              const reg = aula.registro;
+              const regs = aula.registros;
+              const primaryReg = regs[0];
               const discKey = resolveDisciplinaKey(aula.materia);
               const inscritos = getEnrolledCountForMateria(aula.materia, comunidadeMap);
               const dayAvisos = avisosColetivos.filter(
@@ -455,7 +478,7 @@ export const TabHoje: React.FC<TabHojeProps> = ({
                       <div className="flex flex-wrap items-center gap-2 text-xs text-[#475569]">
                         <span className="font-mono tabular-nums font-bold text-[#0E1A59] inline-flex items-center gap-1">
                           <Clock className="w-3.5 h-3.5" aria-hidden="true" />
-                          {aula.horarioInicio}–{aula.horarioFim} ({formatNumberClean(aula.horas)}h)
+                          {aula.horarioResumo} ({formatNumberClean(aula.horas)}h)
                         </span>
                         <span
                           style={{ backgroundColor: style.badgeBg, color: style.badgeText }}
@@ -500,7 +523,7 @@ export const TabHoje: React.FC<TabHojeProps> = ({
                     </div>
                   )}
 
-                  {!reg && consensus.count > 0 && (
+                  {regs.length === 0 && consensus.count > 0 && (
                     <div
                       data-testid={`hoje-consensus-${aula.materia.id}`}
                       className="rounded-xl bg-[#DCFCE7]/85 border border-[#86EFAC] p-3 flex flex-wrap items-center justify-between gap-2"
@@ -528,83 +551,81 @@ export const TabHoje: React.FC<TabHojeProps> = ({
                     </div>
                   )}
 
-                  {reg ? (
-                    <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                      <div className="inline-flex items-center gap-2 text-xs font-extrabold">
-                        {reg.tipo === 'falta' && (
-                          <span className="text-[#0E1A59] inline-flex items-center gap-1.5">
-                            <Flame className="w-4 h-4 text-[#EC1580]" aria-hidden="true" />
-                            Falta registrada (−{formatNumberClean(reg.horas)}h)
-                          </span>
-                        )}
-                        {reg.tipo === 'programada' && (
-                          <span className="text-[#EC1580] inline-flex items-center gap-1.5">
-                            <Clock className="w-4 h-4" aria-hidden="true" />
-                            Falta programada (−{formatNumberClean(reg.horas)}h)
-                          </span>
-                        )}
-                        {reg.tipo === 'sem_aula' && (
-                          <span className="text-[#475569] inline-flex items-center gap-1.5">
-                            <CheckCircle2 className="w-4 h-4 text-[#15803D]" aria-hidden="true" />
-                            Sem aula (cota preservada)
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {reg.tipo === 'sem_aula' && !hasSemAulaAviso && (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              onPublishAviso({
-                                materia: aula.materia,
-                                data: selectedDayStr,
-                                tipo: 'sem_aula',
-                                mensagem: `Aula de ${aula.materia.nome} cancelada em ${formatDatePtBr(selectedDayStr)}.`,
-                              })
-                            }
-                            className="min-h-[38px] px-3 py-1 rounded-xl bg-[#FCE7F3] text-[#BE185D] text-[11px] font-extrabold hover:bg-[#fbcfe8] transition-colors inline-flex items-center gap-1 whitespace-nowrap"
-                          >
-                            <Megaphone className="w-3 h-3" aria-hidden="true" />
-                            Avisar turma
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => onDeleteFalta(reg.id)}
-                          className="min-h-[40px] px-3 py-1.5 rounded-xl bg-white border-[1.5px] border-[#CBD5E1] text-xs font-extrabold text-[#0E1A59] hover:border-[#94A3B8] active:scale-95 transition-all inline-flex items-center gap-1.5"
-                        >
-                          <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
-                          Desfazer
-                        </button>
-                      </div>
+                  {regs.length > 0 ? (
+                    <div className="space-y-2 pt-1">
+                      {regs.map((reg) => {
+                        const effH = getEffectiveFaltaHoras(reg);
+                        const turnoTag =
+                          reg.tipoFalta === 'turno_manha'
+                            ? ' · Só Manhã'
+                            : reg.tipoFalta === 'turno_tarde'
+                            ? ' · Só Tarde'
+                            : reg.tipoFalta === 'turno_noite'
+                            ? ' · Só Noite'
+                            : reg.tipoFalta === 'parcial'
+                            ? ' · Parcial'
+                            : '';
+                        return (
+                          <div key={reg.id} className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="inline-flex items-center gap-2 text-xs font-extrabold">
+                              {reg.tipo === 'falta' && (
+                                <span className="text-[#0E1A59] inline-flex items-center gap-1.5">
+                                  <Flame className="w-4 h-4 text-[#EC1580]" aria-hidden="true" />
+                                  Falta registrada (−{formatNumberClean(effH)}h{turnoTag})
+                                </span>
+                              )}
+                              {reg.tipo === 'programada' && (
+                                <span className="text-[#EC1580] inline-flex items-center gap-1.5">
+                                  <Clock className="w-4 h-4" aria-hidden="true" />
+                                  Falta programada (−{formatNumberClean(effH)}h{turnoTag})
+                                </span>
+                              )}
+                              {reg.tipo === 'sem_aula' && (
+                                <span className="text-[#475569] inline-flex items-center gap-1.5">
+                                  <CheckCircle2 className="w-4 h-4 text-[#15803D]" aria-hidden="true" />
+                                  Sem aula{turnoTag} (cota preservada)
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {reg.tipo === 'sem_aula' && !hasSemAulaAviso && primaryReg?.id === reg.id && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    onPublishAviso({
+                                      materia: aula.materia,
+                                      data: selectedDayStr,
+                                      tipo: 'sem_aula',
+                                      mensagem: `Aula de ${aula.materia.nome} cancelada em ${formatDatePtBr(selectedDayStr)}.`,
+                                    })
+                                  }
+                                  className="min-h-[38px] px-3 py-1 rounded-xl bg-[#FCE7F3] text-[#BE185D] text-[11px] font-extrabold hover:bg-[#fbcfe8] transition-colors inline-flex items-center gap-1 whitespace-nowrap"
+                                >
+                                  <Megaphone className="w-3 h-3" aria-hidden="true" />
+                                  Avisar turma
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => onDeleteFalta(reg.id)}
+                                className="min-h-[40px] px-3 py-1.5 rounded-xl bg-white border-[1.5px] border-[#CBD5E1] text-xs font-extrabold text-[#0E1A59] hover:border-[#94A3B8] active:scale-95 transition-all inline-flex items-center gap-1.5"
+                              >
+                                <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
+                                Desfazer
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   ) : (
-                    <div className="grid grid-cols-3 gap-2 pt-1">
-                      <button
-                        type="button"
-                        disabled={busyId !== null}
-                        onClick={() => handleQuickAction(aula.materia.id, aula.horas, 'falta')}
-                        className="min-h-[44px] rounded-xl bg-[#0E1A59] text-white text-xs font-extrabold hover:bg-[#14267D] active:scale-95 transition-all whitespace-nowrap px-2"
-                      >
-                        Faltei
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busyId !== null}
-                        onClick={() => handleQuickAction(aula.materia.id, aula.horas, 'programada')}
-                        className="min-h-[44px] rounded-xl bg-[#EC1580] text-white text-xs font-extrabold hover:bg-[#d11170] active:scale-95 transition-all whitespace-nowrap px-2"
-                      >
-                        Programar
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busyId !== null}
-                        onClick={() => handleQuickAction(aula.materia.id, aula.horas, 'sem_aula')}
-                        className="min-h-[44px] rounded-xl bg-white border-[1.5px] border-[#CBD5E1] text-[#0E1A59] text-xs font-extrabold hover:border-[#94A3B8] active:scale-95 transition-all whitespace-nowrap px-2"
-                      >
-                        Sem Aula
-                      </button>
-                    </div>
+                    <SmartFaltaSelector
+                      materia={aula.materia}
+                      isoDate={selectedDayStr}
+                      busy={busyId !== null}
+                      compact
+                      onSubmit={onRecordFalta}
+                    />
                   )}
                 </div>
               );
@@ -953,14 +974,24 @@ export const TabHoje: React.FC<TabHojeProps> = ({
             </h2>
             <span className="text-xs text-[#475569]">Toque em um dia para ver aulas</span>
           </div>
-          <button
-            type="button"
-            onClick={onOpenCalendario}
-            className="min-h-[36px] px-3 rounded-xl bg-[#E6E9F0]/70 border border-[#CBD5E1] text-[11px] font-extrabold text-[#0E1A59] hover:border-[#0E1A59] inline-flex items-center gap-1.5 whitespace-nowrap"
-          >
-            <span>Abrir calendário completo</span>
-            <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={onOpenGradeSemanal}
+              className="min-h-[36px] px-3 rounded-xl bg-[#0E1A59] text-white text-[11px] font-extrabold hover:bg-[#14267D] inline-flex items-center gap-1.5 whitespace-nowrap"
+            >
+              <span>Grade Semanal</span>
+              <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              onClick={onOpenCalendario}
+              className="min-h-[36px] px-3 rounded-xl bg-[#E6E9F0]/70 border border-[#CBD5E1] text-[11px] font-extrabold text-[#0E1A59] hover:border-[#0E1A59] inline-flex items-center gap-1.5 whitespace-nowrap"
+            >
+              <span>Abrir calendário</span>
+              <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
+            </button>
+          </div>
         </div>
 
         <div className="grid grid-cols-6 gap-1.5 sm:gap-2">

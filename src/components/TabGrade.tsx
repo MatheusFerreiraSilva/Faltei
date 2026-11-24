@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  CalendarClock,
   Camera,
   Check,
   Cloud,
@@ -60,6 +61,7 @@ interface TabGradeProps {
   onDeleteMateria: (materiaId: string) => Promise<void>;
   onSelectMateria?: (materiaId: string) => void;
   onOpenConfig: () => void;
+  onOpenGradeSemanal?: () => void;
   onUpdateSemestreConfig: (config: SemestreConfig) => Promise<void>;
   onPublishCatalogUpdate: (
     nextSemestre: SemestreConfig,
@@ -83,6 +85,7 @@ export const TabGrade: React.FC<TabGradeProps> = ({
   onDeleteMateria,
   onSelectMateria,
   onOpenConfig,
+  onOpenGradeSemanal,
   onUpdateSemestreConfig,
   onPublishCatalogUpdate,
 }) => {
@@ -192,6 +195,7 @@ export const TabGrade: React.FC<TabGradeProps> = ({
       local: cat.local,
       periodo: cat.periodo,
       horarios: cat.horarios,
+      blocosAula: cat.blocosAula,
       regraModo: cat.divisaoDiferente ? 'diferente_por_dia' : 'horas_totais',
       cargaHorariaTotal: cat.cargaHorariaTotal,
       percentualLimite: userProfile?.percentualPadrao ?? 25,
@@ -466,8 +470,20 @@ export const TabGrade: React.FC<TabGradeProps> = ({
             Catálogo ativo: {semestreConfig.nome} ({catalogo.length} disciplinas)
           </p>
         </div>
-        <div className="sm:hidden">
-          <PWAInstallButton variant="compact" />
+        <div className="flex flex-wrap items-center gap-2">
+          {onOpenGradeSemanal && (
+            <button
+              type="button"
+              onClick={onOpenGradeSemanal}
+              className="min-h-[40px] px-3.5 rounded-xl bg-white border-[1.5px] border-[#CBD5E1] text-xs font-extrabold text-[#0E1A59] hover:border-[#0E1A59] inline-flex items-center gap-1.5 whitespace-nowrap"
+            >
+              <CalendarClock className="w-4 h-4 text-[#EC1580]" aria-hidden="true" />
+              <span>Ver Grade Semanal</span>
+            </button>
+          )}
+          <div className="sm:hidden">
+            <PWAInstallButton variant="compact" />
+          </div>
         </div>
       </div>
 

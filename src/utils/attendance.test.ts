@@ -6,11 +6,20 @@ import {
   calculateMateriaStats,
   countScheduledMeetings,
   diffCatalogs,
+  getDayAttendanceOptions,
   getDynamicHeroGreeting,
+  getMateriaBlocos,
   getPeriodoStyle,
   simulateAbsenceRange,
   sortMateriasByUrgency,
 } from './attendance';
+import {
+  buildWeeklyScheduleModel,
+  computeBlockGeometry,
+  HOUR_HEIGHT_PX,
+  shiftWeekIso,
+  WEEKLY_TOTAL_HEIGHT_PX,
+} from './weeklyGrid';
 import {
   applyCatalogLinkToCandidate,
   isStale2026Catalog,
@@ -572,6 +581,255 @@ test('Author display name sanitization and crowd sem_aula consensus propagate in
   assert.equal(nov27.items[0].semAulaConsensusCount, 5);
   assert.equal(nov27.items[0].semAulaAutorHint, 'Matheus Henrique');
 });
+
+test('Block 2: blocosAula splits multi-turn subjects, computes turn-only & partial absences, and renders real-day balance translation', () => {
+  const semiologiaCat = CATALOGO_2026_2.find((c) => c.id === 'unirio_2026_2_p4_semiologia_adulto_1');
+  const sistNervosoCat = CATALOGO_2026_2.find((c) => c.id === 'unirio_2026_2_p2_sistema_nervoso');
+  const hematoCat = CATALOGO_2026_2.find((c) => c.id === 'unirio_2026_2_p7_hematologia');
+  const locomotorCat = CATALOGO_2026_2.find((c) => c.id === 'unirio_2026_2_p1_sistema_locomotor');
+
+  assert.ok(semiologiaCat && sistNervosoCat && hematoCat && locomotorCat);
+
+  // Thursday (diaSemana 4) Semiologia has Manhã (2h) + Tarde (4h)
+  const semBlocosThu = (semiologiaCat.blocosAula || []).filter((b) => b.diaSemana === 4);
+  assert.equal(semBlocosThu.length, 2);
+  assert.equal(semBlocosThu[0].turno, 'manha');
+  assert.equal(semBlocosThu[0].horas, 2);
+  assert.equal(semBlocosThu[1].turno, 'tarde');
+  assert.equal(semBlocosThu[1].horas, 4);
+
+  // Thursday (diaSemana 4) Sistema Nervoso has Manhã (2h) + Tarde (4h)
+  const snBlocosThu = (sistNervosoCat.blocosAula || []).filter((b) => b.diaSemana === 4);
+  assert.equal(snBlocosThu.length, 2);
+  assert.equal(snBlocosThu[0].horas, 2);
+  assert.equal(snBlocosThu[1].horas, 4);
+
+  // Wednesday (diaSemana 3) Hematologia splits into Manhã (2h) + Tarde (1h)
+  const hemBlocosWed = (hematoCat.blocosAula || []).filter((b) => b.diaSemana === 3);
+  assert.equal(hemBlocosWed.length, 2);
+  assert.equal(hemBlocosWed[0].horas, 2);
+  assert.equal(hemBlocosWed[1].horas, 1);
+
+  const sistNervosoMat: UserMateria = {
+    id: 'mat_sn',
+    userId: 'u1',
+    catalogoId: sistNervosoCat.id,
+    semestreId: '2026.2',
+    nome: sistNervosoCat.nome,
+    local: sistNervosoCat.local,
+    periodo: sistNervosoCat.periodo,
+    horarios: sistNervosoCat.horarios,
+    blocosAula: getMateriaBlocos({
+      id: 'mat_sn',
+      local: sistNervosoCat.local,
+      horarios: sistNervosoCat.horarios,
+      blocosAula: sistNervosoCat.blocosAula,
+    }),
+    regraModo: 'horas_totais',
+    cargaHorariaTotal: sistNervosoCat.cargaHorariaTotal,
+    percentualLimite: 25,
+    cotaIsoladaPorDia: false,
+  };
+
+  // Options on Thursday (2026-09-10): Dia Completo (6h), Só Manhã (2h), Só Tarde (4h), maxParcial = 5
+  const thuSummary = getDayAttendanceOptions(sistNervosoMat, '2026-09-10');
+  assert.equal(thuSummary.hasTurnosDistintos, true);
+  assert.equal(thuSummary.totalHorasDia, 6);
+  assert.equal(thuSummary.maxParcialHoras, 5);
+  assert.equal(thuSummary.options.map((o) => o.tipoFalta).join(','), 'dia_completo,turno_manha,turno_tarde');
+
+  // Turn-only absence (Só Manhã = 2h) leaves remaining afternoon intact in quota calculation
+  const manhaOpt = thuSummary.options.find((o) => o.tipoFalta === 'turno_manha')!;
+  const statsManha = calculateMateriaStats(
+    sistNervosoMat,
+    [
+      {
+        id: 'fm1',
+        userId: 'u1',
+        materiaId: 'mat_sn',
+        data: '2026-09-10',
+        diaSemana: 4,
+        horas: 2,
+        horasAbatidas: 2,
+        tipoFalta: 'turno_manha',
+        blocoId: manhaOpt.blocoId,
+        tipo: 'falta',
+      },
+    ],
+    SEMESTRE_2026_2,
+    '2026-09-10'
+  );
+  assert.equal(statsManha.consumidoConfirmado, 2);
+
+  // Partial 1h absence on a 4h Friday class
+  const partialStats = calculateMateriaStats(
+    baseMateriaHoras,
+    [
+      {
+        id: 'fp1',
+        userId: 'u1',
+        materiaId: baseMateriaHoras.id,
+        data: '2026-09-04',
+        diaSemana: 5,
+        horas: 1,
+        horasAbatidas: 1,
+        tipoFalta: 'parcial',
+        tipo: 'falta',
+      },
+    ],
+    SEMESTRE_2026_2,
+    '2026-09-10'
+  );
+  assert.equal(partialStats.consumidoConfirmado, 1);
+  assert.equal(partialStats.restanteLivre, 15);
+
+  // Real-day balance translation for uneven-day subject (3h Thu + 2h Fri, 12h free)
+  const locomotorMat: UserMateria = {
+    id: 'mat_loc',
+    userId: 'u1',
+    semestreId: '2026.2',
+    nome: 'Sistema Locomotor',
+    periodo: '1',
+    horarios: locomotorCat.horarios,
+    blocosAula: locomotorCat.blocosAula,
+    regraModo: 'diferente_por_dia',
+    cargaHorariaTotal: 48, // 25% = 12h free
+    percentualLimite: 25,
+    cotaIsoladaPorDia: false,
+  };
+  const locStats = calculateMateriaStats(locomotorMat, [], SEMESTRE_2026_2, '2026-09-01');
+  assert.equal(
+    locStats.traducaoHumana,
+    'Saldo: 12h livres = até 4 faltas de 5ªF (3h) ou 6 faltas de 6ªF (2h)'
+  );
+
+  // Simulator sums both Morning + Afternoon blocks on Thursday (2h + 4h = 6h)
+  const simSn = simulateAbsenceRange(
+    [sistNervosoMat],
+    [],
+    SEMESTRE_2026_2,
+    '2026-09-10',
+    '2026-09-10',
+    '2026-09-01'
+  );
+  assert.equal(simSn.itens.length, 1);
+  assert.equal(simSn.itens[0].horasSimuladas, 6);
+});
+
+test('Block 1: weeklyGrid builds proportional 52px/h blocks, hides Saturday unless active, and reflects faltas/feriados/avaliações', () => {
+  assert.equal(HOUR_HEIGHT_PX, 52);
+  assert.equal(WEEKLY_TOTAL_HEIGHT_PX, 624);
+
+  const g4h = computeBlockGeometry('08:00', '12:00');
+  const g2h = computeBlockGeometry('13:00', '15:00');
+  assert.equal(g4h.topPx, 52);
+  assert.equal(g4h.heightPx, 208);
+  assert.equal(g2h.topPx, 312);
+  assert.equal(g2h.heightPx, 104);
+  assert.equal(g4h.heightPx, g2h.heightPx * 2);
+
+  assert.equal(shiftWeekIso('2026-09-08', 1), '2026-09-14');
+  assert.equal(shiftWeekIso('2026-09-08', -1), '2026-08-31');
+
+  const semiologiaCat = CATALOGO_2026_2.find((c) => c.id === 'unirio_2026_2_p4_semiologia_adulto_1')!;
+  const semiologiaMat: UserMateria = {
+    id: 'mat_semio',
+    userId: 'u1',
+    catalogoId: semiologiaCat.id,
+    semestreId: '2026.2',
+    nome: semiologiaCat.nome,
+    local: semiologiaCat.local,
+    periodo: '4',
+    horarios: semiologiaCat.horarios,
+    blocosAula: semiologiaCat.blocosAula,
+    regraModo: 'horas_totais',
+    cargaHorariaTotal: semiologiaCat.cargaHorariaTotal,
+    percentualLimite: 25,
+    cotaIsoladaPorDia: false,
+  };
+  const manhaBlock = getMateriaBlocos(semiologiaMat).find(
+    (b) => b.diaSemana === 4 && b.turno === 'manha'
+  )!;
+
+  // Week of 2026-09-07 (contains Sept 7 holiday on Mon) without Saturday class -> 5 columns
+  const model5 = buildWeeklyScheduleModel({
+    anchorIso: '2026-09-09',
+    todayStr: '2026-09-09',
+    semestreConfig: SEMESTRE_2026_2,
+    materias: [semiologiaMat, baseMateriaHoras],
+    faltas: [
+      {
+        id: 'f_thu_m',
+        userId: 'u1',
+        materiaId: semiologiaMat.id,
+        data: '2026-09-10',
+        diaSemana: 4,
+        horas: 2,
+        horasAbatidas: 2,
+        tipoFalta: 'turno_manha',
+        blocoId: manhaBlock.id,
+        tipo: 'falta',
+      },
+      {
+        id: 'f_fri_p',
+        userId: 'u1',
+        materiaId: baseMateriaHoras.id,
+        data: '2026-09-11',
+        diaSemana: 5,
+        horas: 4,
+        tipo: 'programada',
+      },
+    ],
+    eventos: [
+      {
+        id: 'ev_thu',
+        userId: 'u1',
+        materiaId: semiologiaMat.id,
+        disciplinaNome: semiologiaMat.nome,
+        semestreId: '2026.2',
+        data: '2026-09-10',
+        tipo: 'prova',
+        titulo: 'P1 Semiologia',
+      },
+    ],
+    avisosColetivos: [],
+  });
+
+  assert.equal(model5.hasSaturday, false);
+  assert.equal(model5.columns.length, 5);
+  assert.equal(model5.isCurrentWeek, true);
+  assert.ok(model5.columns[0].holiday); // Sept 7 Independence Day
+
+  const thuCol = model5.columns.find((c) => c.diaSemana === 4)!;
+  assert.equal(thuCol.dayEvaluations.length, 1);
+  const thuManha = thuCol.blocks.find((b) => b.bloco.id === manhaBlock.id)!;
+  const thuTarde = thuCol.blocks.find((b) => b.bloco.id !== manhaBlock.id)!;
+  assert.equal(thuManha.visualState, 'falta');
+  assert.equal(thuTarde.visualState, 'normal'); // Turn-only absence kept afternoon normal!
+
+  const friCol = model5.columns.find((c) => c.diaSemana === 5)!;
+  assert.equal(friCol.blocks[0].visualState, 'programada');
+
+  // With a Saturday class, Saturday column appears automatically (6 columns)
+  const satMat: UserMateria = {
+    ...baseMateriaHoras,
+    id: 'mat_sat',
+    horarios: [{ diaSemana: 6, horarioInicio: '08:00', horarioFim: '10:00', horas: 2 }],
+    blocosAula: undefined,
+  };
+  const model6 = buildWeeklyScheduleModel({
+    anchorIso: '2026-09-09',
+    todayStr: '2026-09-09',
+    semestreConfig: SEMESTRE_2026_2,
+    materias: [satMat],
+    faltas: [],
+    eventos: [],
+    avisosColetivos: [],
+  });
+  assert.equal(model6.hasSaturday, true);
+  assert.equal(model6.columns.length, 6);
+});
+
 
 
 

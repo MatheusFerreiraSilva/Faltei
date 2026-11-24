@@ -29,6 +29,7 @@
           "enum": ["1", "2", "3", "4", "5", "6", "7", "8", "optativa"]
         },
         "horarios": { "type": "array", "description": "Horários semanais (máximo 7 encontros)." },
+        "blocosAula": { "type": "array", "description": "Blocos de aula estruturados por turno (máximo 14 blocos)." },
         "divisaoDiferente": { "type": "boolean" },
         "cargaHorariaTotal": { "type": "number" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -68,6 +69,7 @@
           "enum": ["1", "2", "3", "4", "5", "6", "7", "8", "optativa"]
         },
         "horarios": { "type": "array", "description": "Dias da semana e horários (máximo 7)." },
+        "blocosAula": { "type": "array", "description": "Blocos de aula estruturados por turno (máximo 14 blocos)." },
         "regraModo": {
           "type": "string",
           "enum": ["horas_totais", "diferente_por_dia", "por_encontros"]
@@ -106,6 +108,9 @@
         "diaSemana": { "type": "number" },
         "horas": { "type": "number" },
         "tipo": { "type": "string", "enum": ["falta", "programada", "sem_aula"] },
+        "tipoFalta": { "type": "string", "enum": ["dia_completo", "turno_manha", "turno_tarde", "turno_noite", "parcial"] },
+        "horasAbatidas": { "type": "number" },
+        "blocoId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
         "observacao": { "type": "string", "maxLength": 240 },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -236,6 +241,40 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["userId", "consensoId", "disciplinaKey", "data", "autorNome", "createdAt"]
+    },
+    "EventoColetivoDisciplina": {
+      "title": "EventoColetivoDisciplina",
+      "description": "Evento acadêmico coletivo vinculado a uma disciplina na comunidade (prova, trabalho, seminário ou sem aula).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "disciplinaKey": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "disciplinaNome": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "semestreId": { "type": "string", "maxLength": 32 },
+        "data": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "tipo": { "type": "string", "enum": ["prova", "trabalho", "trabalho_grupo", "seminario", "sem_aula", "aviso"] },
+        "titulo": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "detalhes": { "type": "string", "maxLength": 240 },
+        "grupo": { "type": "string", "maxLength": 100 },
+        "horario": { "type": "string", "maxLength": 16 },
+        "autorUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9._\\-]+$" },
+        "autorNome": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "disciplinaKey",
+        "disciplinaNome",
+        "semestreId",
+        "data",
+        "tipo",
+        "titulo",
+        "autorUid",
+        "autorNome",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -266,6 +305,10 @@
     "/disciplinas_comunidade/{disciplinaKey}/inscritos/{userId}": {
       "schema": { "$ref": "#/entities/InscritoDisciplina" },
       "description": "Controle de unicidade de inscrição do aluno na disciplina."
+    },
+    "/disciplinas_comunidade/{disciplinaKey}/eventos_coletivos/{eventKey}": {
+      "schema": { "$ref": "#/entities/EventoColetivoDisciplina" },
+      "description": "Eventos coletivos compartilhados por disciplina na comunidade, com autoria vinculada ao UID do criador."
     },
     "/avisos_coletivos/{avisoId}": {
       "schema": { "$ref": "#/entities/AvisoColetivo" },

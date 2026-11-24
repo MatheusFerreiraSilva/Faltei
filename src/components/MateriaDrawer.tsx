@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
-import { Check, Clock, Plus, RotateCcw, Trash2, Users, X } from 'lucide-react';
+import { Check, Clock, RotateCcw, Trash2, Users, X } from 'lucide-react';
 import {
   DiaSemana,
   DisciplinaComunidade,
+  FaltaDetalheTipo,
   FaltaTipo,
   MateriaStats,
   RegraModo,
@@ -13,10 +14,11 @@ import {
   DIA_SEMANA_LABELS,
   formatDatePtBr,
   formatNumberClean,
-  getDiaSemanaFromIso,
+  getEffectiveFaltaHoras,
   getPeriodoStyle,
 } from '../utils/attendance';
 import { getEnrolledCountForMateria, resolveDisciplinaKey } from '../utils/disciplinaKey';
+import { SmartFaltaSelector } from './SmartFaltaSelector';
 
 interface MateriaDrawerProps {
   stats: MateriaStats | null;
@@ -32,6 +34,9 @@ interface MateriaDrawerProps {
     diaSemana: DiaSemana;
     horas: number;
     tipo: FaltaTipo;
+    tipoFalta?: FaltaDetalheTipo;
+    horasAbatidas?: number;
+    blocoId?: string;
   }) => Promise<void>;
   onUpdateMateria: (materiaId: string, updates: Partial<UserMateria>) => Promise<void>;
   onDeleteMateria: (materiaId: string) => Promise<void>;
@@ -60,7 +65,6 @@ export const MateriaDrawer: React.FC<MateriaDrawerProps> = ({
     stats?.materia.encontrosTotaisSemestre || 30
   );
   const [manualDate, setManualDate] = useState<string>(todayStr);
-  const [manualTipo, setManualTipo] = useState<FaltaTipo>('falta');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -93,28 +97,6 @@ export const MateriaDrawer: React.FC<MateriaDrawerProps> = ({
         encontrosTotaisSemestre: encontrosTotais,
       });
       setEditingRule(false);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleAddManualDate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!manualDate) return;
-    const rawDow = getDiaSemanaFromIso(manualDate);
-    const dow = (rawDow >= 1 && rawDow <= 6 ? rawDow : materia.horarios[0]?.diaSemana || 1) as DiaSemana;
-    const matchedHorario = materia.horarios.find((h) => h.diaSemana === dow);
-    const horas = matchedHorario?.horas || materia.horarios[0]?.horas || 2;
-
-    setSaving(true);
-    try {
-      await onRecordFalta({
-        materiaId: materia.id,
-        data: manualDate,
-        diaSemana: dow,
-        horas,
-        tipo: manualTipo,
-      });
     } finally {
       setSaving(false);
     }
@@ -352,37 +334,25 @@ export const MateriaDrawer: React.FC<MateriaDrawerProps> = ({
             )}
           </div>
 
-          {/* Lançamento manual rápido */}
-          <form onSubmit={handleAddManualDate} className="space-y-2.5">
-            <h3 className="text-sm font-extrabold text-[#0E1A59]">Registrar data no histórico</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          {/* Lançamento manual rápido com turno e falta parcial */}
+          <div className="space-y-2.5 rounded-2xl bg-[#E6E9F0]/45 border-[1.5px] border-[#CBD5E1] p-3.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-sm font-extrabold text-[#0E1A59]">Registrar data no histórico</h3>
               <input
                 type="date"
                 aria-label="Data do registro"
                 value={manualDate}
                 onChange={(e) => setManualDate(e.target.value)}
-                className="min-h-[42px] rounded-xl border-[1.5px] border-[#CBD5E1] px-3 text-xs font-mono tabular-nums"
+                className="min-h-[36px] rounded-xl border-[1.5px] border-[#CBD5E1] bg-white px-2.5 text-xs font-mono tabular-nums"
               />
-              <select
-                aria-label="Tipo de registro"
-                value={manualTipo}
-                onChange={(e) => setManualTipo(e.target.value as FaltaTipo)}
-                className="min-h-[42px] rounded-xl border-[1.5px] border-[#CBD5E1] px-3 text-xs font-bold text-[#0E1A59]"
-              >
-                <option value="falta">Faltei</option>
-                <option value="programada">Programar falta</option>
-                <option value="sem_aula">Sem aula</option>
-              </select>
-              <button
-                type="submit"
-                disabled={saving}
-                className="min-h-[42px] rounded-xl bg-[#0E1A59] text-white text-xs font-extrabold inline-flex items-center justify-center gap-1.5 hover:bg-[#14267D]"
-              >
-                <Plus className="w-3.5 h-3.5" aria-hidden="true" />
-                Lançar
-              </button>
             </div>
-          </form>
+            <SmartFaltaSelector
+              materia={materia}
+              isoDate={manualDate || todayStr}
+              compact
+              onSubmit={onRecordFalta}
+            />
+          </div>
 
           {/* Histórico de Datas */}
           <div className="space-y-3">
@@ -395,20 +365,37 @@ export const MateriaDrawer: React.FC<MateriaDrawerProps> = ({
               </p>
             ) : (
               <div className="space-y-2">
-                {logs.map((log) => (
+                {logs.map((log) => {
+                  const effHoras = getEffectiveFaltaHoras(log);
+                  const detalheLabel =
+                    log.tipoFalta === 'turno_manha'
+                      ? 'Só Manhã'
+                      : log.tipoFalta === 'turno_tarde'
+                      ? 'Só Tarde'
+                      : log.tipoFalta === 'turno_noite'
+                      ? 'Só Noite'
+                      : log.tipoFalta === 'parcial'
+                      ? 'Parcial'
+                      : null;
+                  return (
                   <div
                     key={log.id}
                     className="rounded-2xl border-[1.5px] border-[#CBD5E1] p-3.5 flex items-center justify-between gap-3"
                   >
                     <div className="space-y-0.5">
-                      <div className="flex items-center gap-2 text-xs">
+                      <div className="flex flex-wrap items-center gap-1.5 text-xs">
                         <span className="font-mono tabular-nums font-bold text-[#0E1A59]">
                           {formatDatePtBr(log.data)} ({DIA_SEMANA_LABELS[log.diaSemana]?.short || 'Dia'})
                         </span>
                         <span aria-hidden="true">·</span>
                         <span className="font-mono tabular-nums text-[#475569]">
-                          {formatNumberClean(log.horas)}h
+                          {formatNumberClean(effHoras)}h
                         </span>
+                        {detalheLabel && (
+                          <span className="px-1.5 py-0.5 rounded-md bg-[#E6E9F0] text-[#0E1A59] text-[10px] font-extrabold">
+                            {detalheLabel}
+                          </span>
+                        )}
                       </div>
                       <p
                         className={`text-xs font-bold ${
@@ -459,7 +446,8 @@ export const MateriaDrawer: React.FC<MateriaDrawerProps> = ({
                       </button>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

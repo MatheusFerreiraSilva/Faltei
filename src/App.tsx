@@ -32,6 +32,10 @@ function FalteiAppShell() {
     iso: string;
     nonce: number;
   } | null>(null);
+  const [requestedCalView, setRequestedCalView] = useState<{
+    mode: 'month' | 'weekly';
+    nonce: number;
+  } | null>(null);
 
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -132,6 +136,11 @@ function FalteiAppShell() {
     setActiveTab('calendario');
   };
 
+  const handleOpenGradeSemanal = () => {
+    setRequestedCalView({ mode: 'weekly', nonce: Date.now() });
+    setActiveTab('calendario');
+  };
+
   const handleQuickMigratePreview = async () => {
     setMigratingPreview(true);
     try {
@@ -209,7 +218,11 @@ function FalteiAppShell() {
                 onPublishAviso={store.publishAvisoColetivo}
                 onConfirmAviso={store.confirmAvisoColetivo}
                 onDeleteAviso={store.deleteAvisoColetivo}
-                onOpenCalendario={() => setActiveTab('calendario')}
+                onOpenCalendario={() => {
+                  setRequestedCalView({ mode: 'month', nonce: Date.now() });
+                  setActiveTab('calendario');
+                }}
+                onOpenGradeSemanal={handleOpenGradeSemanal}
                 onOpenCalendarioDate={handleOpenCalendarioDate}
                 onOpenSimulador={() => setActiveTab('simulador')}
                 onOpenGrade={() => setActiveTab('grade')}
@@ -228,6 +241,7 @@ function FalteiAppShell() {
                 semAulaConsensoMap={store.semAulaConsensoMap}
                 avisosColetivos={store.avisosColetivos}
                 requestedDate={requestedCalDate}
+                requestedView={requestedCalView}
                 currentUserUid={store.firebaseUser?.uid || 'local_preview'}
                 isAdmin={store.isAdmin}
                 onAddEvento={store.addEvento}
@@ -275,6 +289,7 @@ function FalteiAppShell() {
                 onDeleteMateria={store.deleteMateria}
                 onSelectMateria={(id) => setDrawerMateriaId(id)}
                 onOpenConfig={() => setConfigOpen(true)}
+                onOpenGradeSemanal={handleOpenGradeSemanal}
                 onUpdateSemestreConfig={store.updateSemestreConfig}
                 onPublishCatalogUpdate={store.publishCatalogUpdate}
               />

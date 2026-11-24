@@ -27,6 +27,7 @@ import {
   AvisoColetivoTipo,
   DiaSemana,
   DisciplinaComunidade,
+  FaltaDetalheTipo,
   FaltaTipo,
   SemAulaConsenso,
   SemestreConfig,
@@ -37,7 +38,10 @@ import {
 } from '../types/domain';
 import {
   formatDatePtBr,
+  formatNumberClean,
+  getDayAttendanceOptions,
   getDiaSemanaFromIso,
+  getEffectiveFaltaHoras,
   getPeriodoStyle,
   parseIsoUtc,
 } from '../utils/attendance';
@@ -57,6 +61,8 @@ import {
   getEnrolledCountForMateria,
   resolveDisciplinaKey,
 } from '../utils/disciplinaKey';
+import { SmartFaltaSelector } from './SmartFaltaSelector';
+import { WeeklyScheduleView } from './WeeklyScheduleView';
 
 interface TabCalendarioProps {
   todayStr: string;
@@ -68,6 +74,7 @@ interface TabCalendarioProps {
   semAulaConsensoMap: Record<string, SemAulaConsenso>;
   avisosColetivos: AvisoColetivo[];
   requestedDate?: { iso: string; nonce: number } | null;
+  requestedView?: { mode: 'month' | 'weekly'; nonce: number } | null;
   currentUserUid: string;
   isAdmin: boolean;
   onAddEvento: (params: {
@@ -95,6 +102,9 @@ interface TabCalendarioProps {
     diaSemana: DiaSemana;
     horas: number;
     tipo: FaltaTipo;
+    tipoFalta?: FaltaDetalheTipo;
+    horasAbatidas?: number;
+    blocoId?: string;
   }) => Promise<void>;
   onDeleteFalta: (faltaId: string) => Promise<void>;
   onOpenGrade: () => void;
@@ -173,6 +183,7 @@ export const TabCalendario: React.FC<TabCalendarioProps> = ({
   semAulaConsensoMap,
   avisosColetivos,
   requestedDate,
+  requestedView,
   currentUserUid,
   isAdmin,
   onAddEvento,
@@ -185,6 +196,7 @@ export const TabCalendario: React.FC<TabCalendarioProps> = ({
   onOpenGrade,
 }) => {
   const initialYm = useMemo(() => parseYearMonthFromIso(todayStr), [todayStr]);
+  const [viewMode, setViewMode] = useState<'month' | 'weekly'>('month');
   const [viewYear, setViewYear] = useState<number>(initialYm.year);
   const [viewMonth, setViewMonth] = useState<number>(initialYm.monthIndex0);
   const [selectedDate, setSelectedDate] = useState<string>(todayStr);
@@ -210,6 +222,11 @@ export const TabCalendario: React.FC<TabCalendarioProps> = ({
     setViewYear(ym.year);
     setViewMonth(ym.monthIndex0);
   }, [requestedDate]);
+
+  useEffect(() => {
+    if (!requestedView?.mode) return;
+    setViewMode(requestedView.mode);
+  }, [requestedView]);
 
   const cells = useMemo(
     () =>
@@ -337,15 +354,15 @@ export const TabCalendario: React.FC<TabCalendarioProps> = ({
 
   const handleApplySemAulaFromItem = async (item: CalendarDayItem) => {
     if (!item.materia) return;
-    const rawDow = getDiaSemanaFromIso(selectedDate);
-    const dow = (rawDow >= 1 && rawDow <= 6 ? rawDow : item.materia.horarios[0]?.diaSemana || 1) as DiaSemana;
-    const hMatch = item.materia.horarios.find((h) => h.diaSemana === dow) || item.materia.horarios[0];
+    const summary = getDayAttendanceOptions(item.materia, selectedDate);
     await onRecordFalta({
       materiaId: item.materia.id,
       data: selectedDate,
-      diaSemana: dow,
-      horas: hMatch?.horas || 2,
+      diaSemana: summary.diaSemana,
+      horas: summary.totalHorasDia,
       tipo: 'sem_aula',
+      tipoFalta: 'dia_completo',
+      horasAbatidas: summary.totalHorasDia,
     });
   };
 
@@ -353,7 +370,7 @@ export const TabCalendario: React.FC<TabCalendarioProps> = ({
 
   return (
     <div className="space-y-4">
-      {/* Header & Month Overview Card */}
+      {/* Header & View Mode Switcher */}
       <section className="bento-card p-4 sm:p-6 space-y-4" aria-labelledby="calendario-heading">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
@@ -365,106 +382,169 @@ export const TabCalendario: React.FC<TabCalendarioProps> = ({
                 id="calendario-heading"
                 className="text-lg sm:text-xl font-black text-[#0E1A59] leading-tight capitalize"
               >
-                {getMonthLabelPtBr(viewYear, viewMonth)}
+                {viewMode === 'weekly'
+                  ? 'Grade Horária Semanal'
+                  : getMonthLabelPtBr(viewYear, viewMonth)}
               </h1>
               <p className="text-xs font-semibold text-[#475569]">
-                Toque em qualquer dia para ver aulas, provas, trabalhos ou avisos de sem aula
+                {viewMode === 'weekly'
+                  ? 'Blocos proporcionais de 07:00 às 19:00 · Toque em qualquer aula para registrar ou editar'
+                  : 'Toque em qualquer dia para ver aulas, provas, trabalhos ou avisos de sem aula'}
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5 sm:gap-2">
-            <button
-              type="button"
-              onClick={() => handleShiftMonth(-1)}
-              aria-label="Mês anterior"
-              className="min-h-[44px] min-w-[44px] rounded-xl bg-white border-[1.5px] border-[#CBD5E1] text-[#0E1A59] hover:border-[#0E1A59] flex items-center justify-center transition-colors"
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Prominent Grade Semanal / Mês Switcher */}
+            <div
+              className="inline-flex p-1 rounded-xl bg-[#E6E9F0] border-[1.5px] border-[#CBD5E1]"
+              role="group"
+              aria-label="Modo de visualização do calendário"
             >
-              <ChevronLeft className="w-4 h-4" aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              onClick={handleJumpToday}
-              className="min-h-[44px] px-3 rounded-xl bg-white border-[1.5px] border-[#CBD5E1] text-xs font-extrabold text-[#0E1A59] hover:border-[#0E1A59] transition-colors whitespace-nowrap"
-            >
-              Hoje
-            </button>
-            <button
-              type="button"
-              onClick={() => handleShiftMonth(1)}
-              aria-label="Próximo mês"
-              className="min-h-[44px] min-w-[44px] rounded-xl bg-white border-[1.5px] border-[#CBD5E1] text-[#0E1A59] hover:border-[#0E1A59] flex items-center justify-center transition-colors"
-            >
-              <ChevronRight className="w-4 h-4" aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              onClick={() => handleOpenCreateForm()}
-              className="min-h-[44px] px-3.5 rounded-xl bg-[#EC1580] text-white text-xs font-extrabold hover:bg-[#d11170] transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
-            >
-              <Plus className="w-4 h-4" aria-hidden="true" />
-              <span>Novo evento</span>
-            </button>
+              <button
+                type="button"
+                data-testid="btn-calendario-mes"
+                aria-pressed={viewMode === 'month'}
+                onClick={() => setViewMode('month')}
+                className={`min-h-[38px] px-3 rounded-lg text-xs font-extrabold transition-colors whitespace-nowrap ${
+                  viewMode === 'month'
+                    ? 'bg-white text-[#0E1A59] shadow-sm'
+                    : 'text-[#475569] hover:text-[#0E1A59]'
+                }`}
+              >
+                Mês
+              </button>
+              <button
+                type="button"
+                data-testid="btn-grade-semanal"
+                aria-pressed={viewMode === 'weekly'}
+                onClick={() => setViewMode('weekly')}
+                className={`min-h-[38px] px-3.5 rounded-lg text-xs font-extrabold transition-colors whitespace-nowrap inline-flex items-center gap-1.5 ${
+                  viewMode === 'weekly'
+                    ? 'bg-[#0E1A59] text-white shadow-sm'
+                    : 'text-[#0E1A59] hover:bg-white/70'
+                }`}
+              >
+                <CalendarClock className="w-3.5 h-3.5 text-[#EC1580]" aria-hidden="true" />
+                <span>Grade Semanal</span>
+              </button>
+            </div>
+
+            {viewMode === 'month' && (
+              <div className="flex items-center gap-1.5 sm:gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleShiftMonth(-1)}
+                  aria-label="Mês anterior"
+                  className="min-h-[44px] min-w-[44px] rounded-xl bg-white border-[1.5px] border-[#CBD5E1] text-[#0E1A59] hover:border-[#0E1A59] flex items-center justify-center transition-colors"
+                >
+                  <ChevronLeft className="w-4 h-4" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleJumpToday}
+                  className="min-h-[44px] px-3 rounded-xl bg-white border-[1.5px] border-[#CBD5E1] text-xs font-extrabold text-[#0E1A59] hover:border-[#0E1A59] transition-colors whitespace-nowrap"
+                >
+                  Hoje
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleShiftMonth(1)}
+                  aria-label="Próximo mês"
+                  className="min-h-[44px] min-w-[44px] rounded-xl bg-white border-[1.5px] border-[#CBD5E1] text-[#0E1A59] hover:border-[#0E1A59] flex items-center justify-center transition-colors"
+                >
+                  <ChevronRight className="w-4 h-4" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleOpenCreateForm()}
+                  className="min-h-[44px] px-3.5 rounded-xl bg-[#EC1580] text-white text-xs font-extrabold hover:bg-[#d11170] transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
+                >
+                  <Plus className="w-4 h-4" aria-hidden="true" />
+                  <span>Novo evento</span>
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
-        {/* Month KPI Summary Strip */}
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs font-semibold text-[#475569] border-t border-[#CBD5E1]/70 pt-3">
-          <span className="inline-flex items-center gap-1.5 text-[#BE185D] font-extrabold">
-            <ClipboardCheck className="w-3.5 h-3.5" aria-hidden="true" />
-            <span className="font-mono tabular-nums">{monthSummary.provas}</span>
-            <span>{monthSummary.provas === 1 ? 'prova' : 'provas'}</span>
-          </span>
-          <span aria-hidden="true" className="text-[#CBD5E1]">·</span>
-          <span className="inline-flex items-center gap-1.5 text-[#6D28D9] font-extrabold">
-            <Users className="w-3.5 h-3.5" aria-hidden="true" />
-            <span className="font-mono tabular-nums">{monthSummary.trabalhos}</span>
-            <span>{monthSummary.trabalhos === 1 ? 'trabalho' : 'trabalhos'}</span>
-          </span>
-          <span aria-hidden="true" className="text-[#CBD5E1]">·</span>
-          <span className="inline-flex items-center gap-1.5 text-[#0369A1] font-extrabold">
-            <Presentation className="w-3.5 h-3.5" aria-hidden="true" />
-            <span className="font-mono tabular-nums">{monthSummary.seminarios}</span>
-            <span>{monthSummary.seminarios === 1 ? 'seminário' : 'seminários'}</span>
-          </span>
-          <span aria-hidden="true" className="text-[#CBD5E1]">·</span>
-          <span className="inline-flex items-center gap-1.5 text-[#15803D] font-extrabold">
-            <CalendarOff className="w-3.5 h-3.5" aria-hidden="true" />
-            <span className="font-mono tabular-nums">{monthSummary.semAula}</span>
-            <span>sem aula</span>
-          </span>
-          <span aria-hidden="true" className="text-[#CBD5E1]">·</span>
-          <span className="inline-flex items-center gap-1.5 text-[#0E1A59] font-bold">
-            <BookOpen className="w-3.5 h-3.5" aria-hidden="true" />
-            <span className="font-mono tabular-nums">{monthSummary.aulas}</span>
-            <span>aulas no mês</span>
-          </span>
-        </div>
+        {viewMode === 'month' && (
+          <>
+            {/* Month KPI Summary Strip */}
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs font-semibold text-[#475569] border-t border-[#CBD5E1]/70 pt-3">
+              <span className="inline-flex items-center gap-1.5 text-[#BE185D] font-extrabold">
+                <ClipboardCheck className="w-3.5 h-3.5" aria-hidden="true" />
+                <span className="font-mono tabular-nums">{monthSummary.provas}</span>
+                <span>{monthSummary.provas === 1 ? 'prova' : 'provas'}</span>
+              </span>
+              <span aria-hidden="true" className="text-[#CBD5E1]">·</span>
+              <span className="inline-flex items-center gap-1.5 text-[#6D28D9] font-extrabold">
+                <Users className="w-3.5 h-3.5" aria-hidden="true" />
+                <span className="font-mono tabular-nums">{monthSummary.trabalhos}</span>
+                <span>{monthSummary.trabalhos === 1 ? 'trabalho' : 'trabalhos'}</span>
+              </span>
+              <span aria-hidden="true" className="text-[#CBD5E1]">·</span>
+              <span className="inline-flex items-center gap-1.5 text-[#0369A1] font-extrabold">
+                <Presentation className="w-3.5 h-3.5" aria-hidden="true" />
+                <span className="font-mono tabular-nums">{monthSummary.seminarios}</span>
+                <span>{monthSummary.seminarios === 1 ? 'seminário' : 'seminários'}</span>
+              </span>
+              <span aria-hidden="true" className="text-[#CBD5E1]">·</span>
+              <span className="inline-flex items-center gap-1.5 text-[#15803D] font-extrabold">
+                <CalendarOff className="w-3.5 h-3.5" aria-hidden="true" />
+                <span className="font-mono tabular-nums">{monthSummary.semAula}</span>
+                <span>sem aula</span>
+              </span>
+              <span aria-hidden="true" className="text-[#CBD5E1]">·</span>
+              <span className="inline-flex items-center gap-1.5 text-[#0E1A59] font-bold">
+                <BookOpen className="w-3.5 h-3.5" aria-hidden="true" />
+                <span className="font-mono tabular-nums">{monthSummary.aulas}</span>
+                <span>aulas no mês</span>
+              </span>
+            </div>
 
-        {/* Filter Bar */}
-        <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filtrar calendário">
-          {FILTER_OPTIONS.map((f) => {
-            const active = activeFilter === f.id;
-            return (
-              <button
-                key={f.id}
-                type="button"
-                onClick={() => setActiveFilter(f.id)}
-                className={`min-h-[36px] px-3 rounded-xl text-xs font-extrabold transition-colors whitespace-nowrap ${
-                  active
-                    ? 'bg-[#0E1A59] text-white'
-                    : 'bg-[#E6E9F0]/70 text-[#475569] hover:text-[#0E1A59] border border-[#CBD5E1]'
-                }`}
-              >
-                {f.label}
-              </button>
-            );
-          })}
-        </div>
+            {/* Filter Bar */}
+            <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filtrar calendário">
+              {FILTER_OPTIONS.map((f) => {
+                const active = activeFilter === f.id;
+                return (
+                  <button
+                    key={f.id}
+                    type="button"
+                    onClick={() => setActiveFilter(f.id)}
+                    className={`min-h-[36px] px-3 rounded-xl text-xs font-extrabold transition-colors whitespace-nowrap ${
+                      active
+                        ? 'bg-[#0E1A59] text-white'
+                        : 'bg-[#E6E9F0]/70 text-[#475569] hover:text-[#0E1A59] border border-[#CBD5E1]'
+                    }`}
+                  >
+                    {f.label}
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        )}
       </section>
 
-      {/* Main Split: Large Monthly Grid + Selected Day Detail Panel */}
-      <div className="grid grid-cols-1 lg:grid-cols-[1.72fr_1fr] gap-4 items-start">
+      {viewMode === 'weekly' ? (
+        <WeeklyScheduleView
+          todayStr={todayStr}
+          semestreConfig={semestreConfig}
+          materias={materias}
+          faltas={faltas}
+          eventos={eventos}
+          comunidadeMap={comunidadeMap}
+          semAulaConsensoMap={semAulaConsensoMap}
+          avisosColetivos={avisosColetivos}
+          requestedDate={requestedDate}
+          onRecordFalta={onRecordFalta}
+          onDeleteFalta={onDeleteFalta}
+          onAddEvento={onAddEvento}
+          onOpenGrade={onOpenGrade}
+        />
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-[1.72fr_1fr] gap-4 items-start">
         {/* Large Calendar Grid Card */}
         <section className="bento-card p-3 sm:p-5 space-y-3" aria-label="Grade mensal do calendário">
           <div className="grid grid-cols-7 gap-1 sm:gap-1.5 text-center">
@@ -960,8 +1040,8 @@ export const TabCalendario: React.FC<TabCalendarioProps> = ({
                               {falta.tipo === 'sem_aula'
                                 ? 'Marcado como Sem Aula (cota preservada)'
                                 : falta.tipo === 'programada'
-                                ? 'Falta programada neste dia'
-                                : 'Falta registrada neste dia'}
+                                ? `Falta programada (−${formatNumberClean(getEffectiveFaltaHoras(falta))}h)`
+                                : `Falta registrada (−${formatNumberClean(getEffectiveFaltaHoras(falta))}h)`}
                             </span>
                           </span>
                           <button
@@ -974,53 +1054,13 @@ export const TabCalendario: React.FC<TabCalendarioProps> = ({
                           </button>
                         </div>
                       ) : (
-                        <div className="grid grid-cols-3 gap-1.5 pt-0.5">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              onRecordFalta({
-                                materiaId: mat.id,
-                                data: selectedDate,
-                                diaSemana: h.diaSemana,
-                                horas: h.horas,
-                                tipo: 'falta',
-                              })
-                            }
-                            className="min-h-[36px] rounded-xl bg-[#0E1A59] text-white text-[11px] font-extrabold hover:bg-[#14267D] transition-colors"
-                          >
-                            Faltei
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              onRecordFalta({
-                                materiaId: mat.id,
-                                data: selectedDate,
-                                diaSemana: h.diaSemana,
-                                horas: h.horas,
-                                tipo: 'programada',
-                              })
-                            }
-                            className="min-h-[36px] rounded-xl bg-[#EC1580] text-white text-[11px] font-extrabold hover:bg-[#d11170] transition-colors"
-                          >
-                            Programar
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              onRecordFalta({
-                                materiaId: mat.id,
-                                data: selectedDate,
-                                diaSemana: h.diaSemana,
-                                horas: h.horas,
-                                tipo: 'sem_aula',
-                              })
-                            }
-                            className="min-h-[36px] rounded-xl bg-white border-[1.5px] border-[#CBD5E1] text-[#0E1A59] text-[11px] font-extrabold hover:border-[#0E1A59] transition-colors"
-                          >
-                            Sem Aula
-                          </button>
-                        </div>
+                        <SmartFaltaSelector
+                          materia={mat}
+                          isoDate={selectedDate}
+                          defaultBlocoId={item.bloco?.id}
+                          compact
+                          onSubmit={onRecordFalta}
+                        />
                       )}
                     </div>
                   );
@@ -1167,6 +1207,7 @@ export const TabCalendario: React.FC<TabCalendarioProps> = ({
           )}
         </section>
       </div>
+      )}
     </div>
   );
 };

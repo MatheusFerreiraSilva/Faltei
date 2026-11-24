@@ -27,9 +27,11 @@ import {
 import {
   AvisoColetivo,
   AvisoColetivoTipo,
+  BlocoAula,
   CatalogoDisciplina,
   DiaSemana,
   DisciplinaComunidade,
+  FaltaDetalheTipo,
   FaltaTipo,
   PeriodoId,
   SemAulaConsenso,
@@ -40,7 +42,12 @@ import {
   UserMateria,
   UserProfile,
 } from '../types/domain';
-import { addDaysIso, countScheduledMeetings, toIsoDateLocal } from '../utils/attendance';
+import {
+  addDaysIso,
+  countScheduledMeetings,
+  normalizeBlocosFromHorarios,
+  toIsoDateLocal,
+} from '../utils/attendance';
 import { isStale2026Catalog } from '../utils/catalogMatcher';
 import {
   buildSemAulaConsensoId,
@@ -84,6 +91,10 @@ function buildMateriaFromCatalogo(
     countScheduledMeetings(cat.horarios, semestre.dataInicio, semestre.dataFim, semestre.feriados)
   );
   const pct = Math.max(1, Math.min(99, Math.round(defaultPercentual || 25)));
+  const blocosAula: BlocoAula[] =
+    cat.blocosAula && cat.blocosAula.length > 0
+      ? cat.blocosAula.slice(0, 14)
+      : normalizeBlocosFromHorarios(cat.horarios, cat.local || '', cat.id);
   return {
     id: generateDocId('mat'),
     userId,
@@ -94,6 +105,7 @@ function buildMateriaFromCatalogo(
     local: (cat.local || '').slice(0, 160),
     periodo: cat.periodo,
     horarios: cat.horarios.slice(0, 7),
+    blocosAula,
     regraModo: cat.divisaoDiferente ? 'diferente_por_dia' : 'horas_totais',
     cargaHorariaTotal: Math.max(1, Math.min(1000, cat.cargaHorariaTotal)),
     percentualLimite: pct,
@@ -160,9 +172,9 @@ export function useFalteiStore() {
     return unsub;
   }, []);
 
-  // Public shared config & catalog listeners
+  // Shared config & catalog listeners (authenticated only per Firestore rules)
   useEffect(() => {
-    if (!authReady) return;
+    if (!authReady || !firebaseUser) return;
 
     const configRef = doc(db, 'config', 'semestre_atual');
     const unsubConfig = onSnapshot(
@@ -200,7 +212,7 @@ export function useFalteiStore() {
       unsubConfig();
       unsubCat();
     };
-  }, [authReady]);
+  }, [authReady, firebaseUser]);
 
   // Seed or sync Firestore /config/semestre_atual and /catalogo_disciplinas when Exclusive Admin signs in
   const seedSharedCatalogIfNeeded = useCallback(async (user: User, isUserAdmin: boolean) => {
@@ -985,6 +997,11 @@ export function useFalteiStore() {
         disciplinaKey: input.disciplinaKey,
         nome: input.nome,
       });
+      const computedBlocos: BlocoAula[] = (
+        input.blocosAula && input.blocosAula.length > 0
+          ? input.blocosAula
+          : normalizeBlocosFromHorarios(input.horarios, input.local || '', id)
+      ).slice(0, 14);
       const payload: UserMateria = {
         id,
         userId: uid,
@@ -995,6 +1012,7 @@ export function useFalteiStore() {
         local: (input.local || '').trim().slice(0, 160),
         periodo: input.periodo,
         horarios: input.horarios.slice(0, 7),
+        blocosAula: computedBlocos,
         regraModo: input.regraModo,
         cargaHorariaTotal: Math.max(1, Math.min(1000, Number(input.cargaHorariaTotal) || 32)),
         percentualLimite: Math.max(1, Math.min(99, Number(input.percentualLimite) || 25)),
@@ -1091,7 +1109,20 @@ export function useFalteiStore() {
         if (computedNewKey) sanitized.disciplinaKey = computedNewKey;
         if (updates.local !== undefined) sanitized.local = updates.local.trim().slice(0, 160);
         if (updates.periodo !== undefined) sanitized.periodo = updates.periodo;
-        if (updates.horarios !== undefined) sanitized.horarios = updates.horarios.slice(0, 7);
+        if (updates.horarios !== undefined) {
+          const slicedHorarios = updates.horarios.slice(0, 7);
+          sanitized.horarios = slicedHorarios;
+          if (updates.blocosAula === undefined) {
+            sanitized.blocosAula = normalizeBlocosFromHorarios(
+              slicedHorarios,
+              updates.local ?? existingMat?.local ?? '',
+              materiaId
+            ).slice(0, 14);
+          }
+        }
+        if (updates.blocosAula !== undefined) {
+          sanitized.blocosAula = updates.blocosAula.slice(0, 14);
+        }
         if (updates.regraModo !== undefined) sanitized.regraModo = updates.regraModo;
         if (updates.cargaHorariaTotal !== undefined)
           sanitized.cargaHorariaTotal = Math.max(1, Math.min(1000, Number(updates.cargaHorariaTotal)));
@@ -1288,47 +1319,75 @@ export function useFalteiStore() {
       diaSemana: DiaSemana;
       horas: number;
       tipo: FaltaTipo;
+      tipoFalta?: FaltaDetalheTipo;
+      horasAbatidas?: number;
+      blocoId?: string;
       observacao?: string;
     }) => {
       const uid = firebaseUser?.uid || 'local_preview';
       const targetMateria = materias.find((m) => m.id === params.materiaId);
-      const existingSameDay = faltas.find(
+      const effectiveHoras = Math.max(
+        0.5,
+        Math.min(24, Number(params.horasAbatidas ?? params.horas) || 0.5)
+      );
+      const resolvedTipoFalta: FaltaDetalheTipo = params.tipoFalta || 'dia_completo';
+      const normalizedBlocoId = params.blocoId?.trim().slice(0, 128) || undefined;
+
+      const sameDayAll = faltas.filter(
         (f) => f.materiaId === params.materiaId && f.data === params.data
       );
+      const existingMatch = normalizedBlocoId
+        ? sameDayAll.find((f) => f.blocoId === normalizedBlocoId)
+        : sameDayAll.find((f) => !f.blocoId);
 
-      if (existingSameDay) {
-        const wasSemAula = existingSameDay.tipo === 'sem_aula';
+      // Conflict cleanup: if switching from whole-day to turn-specific, remove the whole-day doc;
+      // if switching from turn-specific to whole-day/partial, remove any turn-specific docs on that date.
+      const toCleanup = normalizedBlocoId
+        ? sameDayAll.filter((f) => !f.blocoId)
+        : sameDayAll.filter((f) => Boolean(f.blocoId));
+
+      const hadSemAulaBefore = sameDayAll.some((f) => f.tipo === 'sem_aula');
+
+      if (existingMatch && toCleanup.length === 0) {
         const willBeSemAula = params.tipo === 'sem_aula';
-        // Update existing record on that date
         if (!firebaseUser) {
           const next = faltas.map((f) =>
-            f.id === existingSameDay.id
+            f.id === existingMatch.id
               ? {
                   ...f,
                   tipo: params.tipo,
-                  horas: params.horas,
+                  horas: effectiveHoras,
+                  horasAbatidas: effectiveHoras,
+                  tipoFalta: resolvedTipoFalta,
+                  ...(normalizedBlocoId ? { blocoId: normalizedBlocoId } : {}),
                   ...(params.observacao ? { observacao: params.observacao.slice(0, 240) } : {}),
                 }
               : f
           );
           setFaltas(next);
           syncLocal(materias, next);
-          if (wasSemAula !== willBeSemAula) {
+          const hasSemAulaAfter = next.some(
+            (f) => f.materiaId === params.materiaId && f.data === params.data && f.tipo === 'sem_aula'
+          );
+          if (hadSemAulaBefore !== hasSemAulaAfter) {
             void syncSemAulaConsensusVote(targetMateria, params.data, willBeSemAula);
           }
           return;
         }
-        const path = `users/${firebaseUser.uid}/faltas/${existingSameDay.id}`;
+        const path = `users/${firebaseUser.uid}/faltas/${existingMatch.id}`;
         try {
-          await updateDoc(doc(db, 'users', firebaseUser.uid, 'faltas', existingSameDay.id), {
+          await updateDoc(doc(db, 'users', firebaseUser.uid, 'faltas', existingMatch.id), {
             tipo: params.tipo,
-            horas: Math.max(0.5, Math.min(24, params.horas)),
+            horas: effectiveHoras,
+            horasAbatidas: effectiveHoras,
+            tipoFalta: resolvedTipoFalta,
+            ...(normalizedBlocoId ? { blocoId: normalizedBlocoId } : {}),
             ...(params.observacao !== undefined
               ? { observacao: params.observacao.slice(0, 240) }
               : {}),
             updatedAt: serverTimestamp(),
           });
-          if (wasSemAula !== willBeSemAula) {
+          if (hadSemAulaBefore !== willBeSemAula) {
             void syncSemAulaConsensusVote(targetMateria, params.data, willBeSemAula);
           }
         } catch (error) {
@@ -1337,37 +1396,54 @@ export function useFalteiStore() {
         return;
       }
 
-      const id = generateDocId('flt');
+      const cleanupIds = new Set(toCleanup.map((f) => f.id));
+      const id = existingMatch?.id || generateDocId('flt');
       const payload: UserFalta = {
         id,
         userId: uid,
         materiaId: params.materiaId,
         data: params.data,
         diaSemana: params.diaSemana,
-        horas: Math.max(0.5, Math.min(24, params.horas)),
+        horas: effectiveHoras,
+        horasAbatidas: effectiveHoras,
+        tipoFalta: resolvedTipoFalta,
+        ...(normalizedBlocoId ? { blocoId: normalizedBlocoId } : {}),
         tipo: params.tipo,
         ...(params.observacao ? { observacao: params.observacao.slice(0, 240) } : {}),
       };
 
       if (!firebaseUser) {
-        const next = [...faltas, payload];
+        const filtered = faltas.filter((f) => !cleanupIds.has(f.id) && f.id !== id);
+        const next = [...filtered, payload];
         setFaltas(next);
         syncLocal(materias, next);
-        if (params.tipo === 'sem_aula') {
-          void syncSemAulaConsensusVote(targetMateria, params.data, true);
+        const hasSemAulaAfter = next.some(
+          (f) => f.materiaId === params.materiaId && f.data === params.data && f.tipo === 'sem_aula'
+        );
+        if (hadSemAulaBefore !== hasSemAulaAfter) {
+          void syncSemAulaConsensusVote(targetMateria, params.data, hasSemAulaAfter);
         }
         return;
       }
 
       const path = `users/${firebaseUser.uid}/faltas/${id}`;
       try {
-        await setDoc(doc(db, 'users', firebaseUser.uid, 'faltas', id), {
+        const batch = writeBatch(db);
+        for (const rem of toCleanup) {
+          batch.delete(doc(db, 'users', firebaseUser.uid, 'faltas', rem.id));
+        }
+        batch.set(doc(db, 'users', firebaseUser.uid, 'faltas', id), {
           ...payload,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
-        if (params.tipo === 'sem_aula') {
-          void syncSemAulaConsensusVote(targetMateria, params.data, true);
+        await batch.commit();
+        const remainingOtherSemAula = sameDayAll.some(
+          (f) => !cleanupIds.has(f.id) && f.id !== id && f.tipo === 'sem_aula'
+        );
+        const hasSemAulaAfter = remainingOtherSemAula || params.tipo === 'sem_aula';
+        if (hadSemAulaBefore !== hasSemAulaAfter) {
+          void syncSemAulaConsensusVote(targetMateria, params.data, hasSemAulaAfter);
         }
       } catch (error) {
         handleFirestoreError(error, OperationType.CREATE, path);
@@ -1548,6 +1624,10 @@ export function useFalteiStore() {
           const batch = writeBatch(db);
           for (const item of nextDisciplinas.slice(i, i + 400)) {
             const safeId = item.id.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
+            const itemBlocos =
+              item.blocosAula && item.blocosAula.length > 0
+                ? item.blocosAula.slice(0, 14)
+                : normalizeBlocosFromHorarios(item.horarios, item.local || '', safeId);
             batch.set(doc(db, 'catalogo_disciplinas', safeId), {
               id: safeId,
               semestreId: nextSemestre.id.slice(0, 32),
@@ -1555,6 +1635,7 @@ export function useFalteiStore() {
               local: (item.local || '').slice(0, 160),
               periodo: item.periodo,
               horarios: item.horarios.slice(0, 7),
+              blocosAula: itemBlocos,
               divisaoDiferente: Boolean(item.divisaoDiferente),
               cargaHorariaTotal: Math.max(1, Math.min(1000, item.cargaHorariaTotal)),
               updatedAt: serverTimestamp(),

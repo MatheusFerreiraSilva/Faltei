@@ -4,6 +4,15 @@ export type RegraModo = 'horas_totais' | 'diferente_por_dia' | 'por_encontros';
 
 export type FaltaTipo = 'falta' | 'programada' | 'sem_aula';
 
+export type TurnoAula = 'manha' | 'tarde' | 'noite';
+
+export type FaltaDetalheTipo =
+  | 'dia_completo'
+  | 'turno_manha'
+  | 'turno_tarde'
+  | 'turno_noite'
+  | 'parcial';
+
 export type RiskLevel = 'SEGURO' | 'ATENÇÃO' | 'CRÍTICO' | 'ESTOURADO';
 
 export type DiaSemana = 1 | 2 | 3 | 4 | 5 | 6; // 1=Seg .. 6=Sáb
@@ -15,6 +24,17 @@ export interface HorarioAula {
   horas: number; // 4
   local?: string;
   modalidadeTag?: string; // ex: "Teoria" / "Prática" / "Manhã + Tarde"
+}
+
+export interface BlocoAula {
+  id: string;
+  diaSemana: DiaSemana;
+  turno: TurnoAula;
+  horarioInicio: string; // "08:00"
+  horarioFim: string; // "12:00"
+  horas: number;
+  local: string;
+  modalidadeTag?: string;
 }
 
 export interface Feriado {
@@ -39,6 +59,7 @@ export interface CatalogoDisciplina {
   local: string;
   periodo: PeriodoId;
   horarios: HorarioAula[];
+  blocosAula?: BlocoAula[];
   divisaoDiferente: boolean;
   cargaHorariaTotal: number;
   updatedAt?: unknown;
@@ -65,6 +86,7 @@ export interface UserMateria {
   local?: string;
   periodo: PeriodoId;
   horarios: HorarioAula[];
+  blocosAula?: BlocoAula[];
   regraModo: RegraModo;
   cargaHorariaTotal: number;
   percentualLimite: number; // default 25
@@ -153,6 +175,9 @@ export interface UserFalta {
   diaSemana: DiaSemana;
   horas: number;
   tipo: FaltaTipo;
+  tipoFalta?: FaltaDetalheTipo;
+  horasAbatidas?: number;
+  blocoId?: string;
   observacao?: string;
   createdAt?: unknown;
   updatedAt?: unknown;

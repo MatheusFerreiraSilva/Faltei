@@ -1,5 +1,6 @@
 import {
   AvisoColetivo,
+  BlocoAula,
   DiaSemana,
   HorarioAula,
   PeriodoId,
@@ -9,7 +10,7 @@ import {
   UserFalta,
   UserMateria,
 } from '../types/domain';
-import { addDaysIso, formatIsoUtc, getDiaSemanaFromIso } from './attendance';
+import { addDaysIso, formatIsoUtc, getDiaSemanaFromIso, getEffectiveFaltaHoras, getMateriaBlocos } from './attendance';
 import { getClassSemAulaConsensus, resolveDisciplinaKey } from './disciplinaKey';
 
 export type CalendarFilterMode = 'all' | 'avaliacoes' | 'sem_aula' | 'aulas' | 'faltas';
@@ -47,6 +48,7 @@ export interface CalendarDayItem {
   periodo?: PeriodoId;
   materia?: UserMateria;
   horario?: HorarioAula;
+  bloco?: BlocoAula;
   falta?: UserFalta;
   evento?: UserEvento;
   aviso?: AvisoColetivo;
@@ -403,18 +405,31 @@ export function buildCalendarMonthCells(params: {
       isoDate >= semestreConfig.dataInicio && isoDate <= semestreConfig.dataFim;
     if (inSemester && !feriado && dow >= 1 && dow <= 6) {
       const typedDow = dow as DiaSemana;
-      const matchingClasses: Array<{ materia: UserMateria; horario: HorarioAula }> = [];
+      const matchingClasses: Array<{ materia: UserMateria; horario: HorarioAula; bloco: BlocoAula }> = [];
       for (const m of materias) {
-        for (const h of m.horarios) {
-          if (h.diaSemana === typedDow) {
-            matchingClasses.push({ materia: m, horario: h });
+        for (const b of getMateriaBlocos(m)) {
+          if (b.diaSemana === typedDow) {
+            matchingClasses.push({
+              materia: m,
+              bloco: b,
+              horario: {
+                diaSemana: b.diaSemana,
+                horarioInicio: b.horarioInicio,
+                horarioFim: b.horarioFim,
+                horas: b.horas,
+                local: b.local,
+                modalidadeTag: b.modalidadeTag,
+              },
+            });
           }
         }
       }
       matchingClasses.sort((a, b) => a.horario.horarioInicio.localeCompare(b.horario.horarioInicio));
 
-      for (const { materia, horario } of matchingClasses) {
-        const faltaRecord = dayFaltas.find((f) => f.materiaId === materia.id);
+      for (const { materia, horario, bloco } of matchingClasses) {
+        const faltaRecord =
+          dayFaltas.find((f) => f.materiaId === materia.id && f.blocoId === bloco.id) ||
+          dayFaltas.find((f) => f.materiaId === materia.id && !f.blocoId);
         const discKey = resolveDisciplinaKey(materia);
         const consensus = getClassSemAulaConsensus({
           semestreId: semestreConfig.id,
@@ -435,13 +450,13 @@ export function buildCalendarMonthCells(params: {
           badgeType === 'sem_aula'
             ? `Não tem aula de ${materia.nome}`
             : badgeType === 'falta'
-            ? `Faltei em ${materia.nome}`
+            ? `Faltei em ${materia.nome} (−${getEffectiveFaltaHoras(faltaRecord!)}h)`
             : badgeType === 'programada'
-            ? `Falta programada · ${materia.nome}`
+            ? `Falta programada · ${materia.nome} (−${getEffectiveFaltaHoras(faltaRecord!)}h)`
             : materia.nome;
 
         rawItems.push({
-          id: `cls_${materia.id}_${horario.horarioInicio}`,
+          id: `cls_${materia.id}_${bloco.id}`,
           kind: 'class',
           badgeType,
           title: titlePrefix,
@@ -452,6 +467,7 @@ export function buildCalendarMonthCells(params: {
           periodo: materia.periodo,
           materia,
           horario,
+          bloco,
           falta: faltaRecord,
           horarioTexto: `${horario.horarioInicio}–${horario.horarioFim}`,
           semAulaConsensusCount: consensus.count,

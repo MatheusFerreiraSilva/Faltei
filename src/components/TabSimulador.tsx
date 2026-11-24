@@ -401,7 +401,7 @@ export const TabSimulador: React.FC<TabSimuladorProps> = ({
                       </div>
 
                       <p className="text-[11px] font-mono tabular-nums text-[#475569]">
-                        Datas: {item.datasAfetadas.map((d) => formatDatePtBr(d.data)).join(', ')}
+                        Datas: {item.datasAfetadas.map((d) => `${formatDatePtBr(d.data)} (${formatNumberClean(d.horas)}h)`).join(', ')}
                       </p>
                     </div>
                   );
