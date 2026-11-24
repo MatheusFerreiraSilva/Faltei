@@ -1,5 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
+  AlertTriangle,
+  Bell,
+  BellRing,
   CheckCircle2,
   Cloud,
   CloudUpload,
@@ -11,10 +14,13 @@ import {
   Settings,
   ShieldCheck,
   Sparkles,
+  Upload,
   User,
   X,
 } from 'lucide-react';
 import {
+  NotificationDigestPayload,
+  NotificationPreferences,
   PeriodoId,
   SemestreConfig,
   UserEvento,
@@ -23,7 +29,9 @@ import {
   UserProfile,
 } from '../types/domain';
 import { getPeriodoStyle } from '../utils/attendance';
+import { serializeBackupPayload } from '../utils/backup';
 import { sanitizeAuthorDisplayName } from '../utils/disciplinaKey';
+import { isIosNonStandaloneSafari, NIGHTLY_TIME_OPTIONS } from '../utils/notifications';
 
 interface ConfigModalProps {
   open: boolean;
@@ -35,12 +43,26 @@ interface ConfigModalProps {
   materias: UserMateria[];
   faltas: UserFalta[];
   eventos: UserEvento[];
+  notificationPrefs: NotificationPreferences;
   hasLocalPreviewToMigrate: boolean;
   onSavePreferences: (updates: {
     displayName?: string;
     periodoAtual?: PeriodoId;
     percentualPadrao?: number;
   }) => Promise<void>;
+  onUpdateNotificationPrefs: (
+    patch: Partial<NotificationPreferences>
+  ) => Promise<{ permission: NotificationPermission | 'unsupported' }>;
+  onTestNotification: () => Promise<{
+    shown: boolean;
+    reason?: string;
+    payload: NotificationDigestPayload;
+  }>;
+  onImportBackupJson: (rawText: string) => Promise<{
+    materias: number;
+    faltas: number;
+    eventos: number;
+  }>;
   onApplyPercentualAll: (percentual: number) => Promise<number>;
   onImportPreviewToCloud: () => Promise<{
     importedMaterias: number;
@@ -64,8 +86,12 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
   materias,
   faltas,
   eventos,
+  notificationPrefs,
   hasLocalPreviewToMigrate,
   onSavePreferences,
+  onUpdateNotificationPrefs,
+  onTestNotification,
+  onImportBackupJson,
   onApplyPercentualAll,
   onImportPreviewToCloud,
   onDismissMigrationBanner,
@@ -82,8 +108,12 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
   const [savingPrefs, setSavingPrefs] = useState(false);
   const [applyingAll, setApplyingAll] = useState(false);
   const [migrating, setMigrating] = useState(false);
+  const [importingBackup, setImportingBackup] = useState(false);
+  const [testingNotif, setTestingNotif] = useState(false);
+  const [notifFeedback, setNotifFeedback] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const backupInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -92,6 +122,7 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
     setPercentualPadrao(userProfile?.percentualPadrao ?? 25);
     setFeedback(null);
     setErrorMsg(null);
+    setNotifFeedback(null);
   }, [open, userProfile?.displayName, userProfile?.percentualPadrao, userProfile?.periodoAtual]);
 
   useEffect(() => {
@@ -167,20 +198,24 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
     }
   };
 
+  const isStandalone =
+    typeof window !== 'undefined' &&
+    (window.matchMedia?.('(display-mode: standalone)').matches ||
+      Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone));
+  const showIosInstallHint =
+    typeof navigator !== 'undefined' && isIosNonStandaloneSafari(navigator.userAgent, isStandalone);
+
   const handleExportJson = () => {
-    const payload = {
-      exportedAt: new Date().toISOString(),
+    const payload = serializeBackupPayload({
       semestre: semestreConfig,
-      profile: {
-        displayName: previewAuthorName,
-        email: userProfile?.email || '',
-        periodoAtual,
-        percentualPadrao,
-      },
+      profile: userProfile,
+      displayName: previewAuthorName,
+      periodoAtual,
+      percentualPadrao,
       materias,
       faltas,
       eventos,
-    };
+    });
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -190,7 +225,62 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+    setErrorMsg(null);
     setFeedback('Backup JSON exportado para o seu dispositivo.');
+  };
+
+  const handleImportJsonFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImportingBackup(true);
+    setFeedback(null);
+    setErrorMsg(null);
+    try {
+      const rawText = await file.text();
+      const restored = await onImportBackupJson(rawText);
+      setFeedback(
+        `Backup restaurado: ${restored.materias} matéria(s), ${restored.faltas} registro(s) e ${restored.eventos} evento(s).`
+      );
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Falha ao importar backup JSON.');
+    } finally {
+      setImportingBackup(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleToggleMasterNotif = async () => {
+    setNotifFeedback(null);
+    const nextAtivo = !notificationPrefs.ativo;
+    const res = await onUpdateNotificationPrefs({ ativo: nextAtivo });
+    if (nextAtivo && res.permission === 'denied') {
+      setNotifFeedback(
+        'As notificações estão bloqueadas nas permissões do navegador. Libere o acesso para receber os alertas.'
+      );
+    } else if (nextAtivo) {
+      setNotifFeedback(
+        `Plantão Noturno ativado para ${notificationPrefs.horarioNoturno || '20:30'}.`
+      );
+    } else {
+      setNotifFeedback('Notificações do Cúmplice pausadas.');
+    }
+  };
+
+  const handleTestNotifClick = async () => {
+    setTestingNotif(true);
+    setNotifFeedback(null);
+    try {
+      const res = await onTestNotification();
+      if (res.shown) {
+        setNotifFeedback(`Notificação enviada: "${res.payload.title}" — ${res.payload.body}`);
+      } else {
+        setNotifFeedback(
+          `${res.reason || 'Prévia gerada:'} "${res.payload.title}" — ${res.payload.body}`
+        );
+      }
+    } finally {
+      setTestingNotif(false);
+    }
   };
 
   return (
@@ -446,6 +536,126 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
           </div>
         </form>
 
+        {/* Notificações do Cúmplice ("Plantão Noturno") */}
+        <section className="rounded-2xl bg-[#E6E9F0]/55 border-[1.5px] border-[#CBD5E1] p-4 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-xl bg-[#0E1A59] text-white flex items-center justify-center shrink-0">
+                <Bell className="w-4 h-4 text-[#EC1580]" aria-hidden="true" />
+              </div>
+              <div>
+                <h3 className="text-xs font-extrabold text-[#0E1A59]">
+                  Notificações do Cúmplice
+                </h3>
+                <p className="text-[11px] font-semibold text-[#475569]">
+                  Briefing noturno com seu saldo e agenda de amanhã
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              role="switch"
+              aria-checked={notificationPrefs.ativo}
+              onClick={handleToggleMasterNotif}
+              className={`min-h-[36px] px-3 rounded-xl text-[11px] font-extrabold transition-colors whitespace-nowrap ${
+                notificationPrefs.ativo
+                  ? 'bg-[#EC1580] text-white'
+                  : 'bg-white border-[1.5px] border-[#CBD5E1] text-[#0E1A59]'
+              }`}
+            >
+              {notificationPrefs.ativo ? 'Ativo no Celular' : 'Ativar Notificações no Celular'}
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
+            <div>
+              <label
+                htmlFor="cfg-notif-horario"
+                className="block text-[11px] font-extrabold text-[#0E1A59] mb-1"
+              >
+                Briefing Noturno
+              </label>
+              <select
+                id="cfg-notif-horario"
+                value={notificationPrefs.horarioNoturno || '20:30'}
+                onChange={(e) =>
+                  void onUpdateNotificationPrefs({ horarioNoturno: e.target.value })
+                }
+                className="w-full min-h-[40px] rounded-xl border-[1.5px] border-[#CBD5E1] bg-white px-3 text-xs font-mono tabular-nums font-bold text-[#0E1A59]"
+              >
+                {NIGHTLY_TIME_OPTIONS.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex sm:justify-end pt-1 sm:pt-4">
+              <button
+                type="button"
+                disabled={testingNotif}
+                onClick={handleTestNotifClick}
+                className="w-full sm:w-auto min-h-[40px] px-3.5 rounded-xl bg-[#0E1A59] text-white text-[11px] font-extrabold hover:bg-[#14267D] inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
+              >
+                <BellRing className="w-3.5 h-3.5 text-[#EC1580]" aria-hidden="true" />
+                <span>{testingNotif ? 'Enviando...' : 'Testar Notificação Agora'}</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            {[
+              {
+                key: 'alertasRisco' as const,
+                label: 'Aulas em risco',
+                checked: notificationPrefs.alertasRisco,
+              },
+              {
+                key: 'alertasAvaliacao' as const,
+                label: 'Provas e entregas',
+                checked: notificationPrefs.alertasAvaliacao,
+              },
+              {
+                key: 'alertasTurma' as const,
+                label: 'Avisos da turma',
+                checked: notificationPrefs.alertasTurma,
+              },
+            ].map((item) => (
+              <label
+                key={item.key}
+                className="flex items-center justify-between gap-2 rounded-xl bg-white border border-[#CBD5E1] px-3 py-2 text-[11px] font-bold text-[#0E1A59] cursor-pointer"
+              >
+                <span>{item.label}</span>
+                <input
+                  type="checkbox"
+                  checked={item.checked}
+                  onChange={(e) =>
+                    void onUpdateNotificationPrefs({ [item.key]: e.target.checked })
+                  }
+                />
+              </label>
+            ))}
+          </div>
+
+          {showIosInstallHint && (
+            <div className="rounded-xl bg-amber-100 border border-amber-400 px-3 py-2 text-[11px] font-bold text-amber-900 flex items-start gap-2">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-800" aria-hidden="true" />
+              <span>
+                No iPhone, toque em Compartilhar &gt; Adicionar à Tela de Início e abra o app pelo
+                ícone para liberar as notificações.
+              </span>
+            </div>
+          )}
+
+          {notifFeedback && (
+            <p className="text-[11px] font-bold text-[#0E1A59] bg-white border border-[#CBD5E1] rounded-xl px-3 py-2">
+              {notifFeedback}
+            </p>
+          )}
+        </section>
+
         {/* Grade & Backup Footer Actions */}
         <div className="pt-3 border-t-[1.5px] border-[#CBD5E1] flex flex-wrap items-center justify-between gap-2">
           <button
@@ -460,16 +670,38 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
             <span>Configurar grade e matérias</span>
           </button>
 
-          <button
-            type="button"
-            onClick={handleExportJson}
-            className="min-h-[40px] px-3.5 rounded-xl bg-white border-[1.5px] border-[#CBD5E1] text-[#475569] hover:text-[#0E1A59] hover:border-[#0E1A59] text-xs font-extrabold inline-flex items-center gap-1.5 transition-colors"
-          >
-            <Download className="w-3.5 h-3.5" aria-hidden="true" />
-            <span>Exportar backup JSON</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              ref={backupInputRef}
+              type="file"
+              accept=".json,application/json"
+              onChange={handleImportJsonFile}
+              className="sr-only"
+              aria-label="Selecionar arquivo JSON de backup"
+            />
+            <button
+              type="button"
+              disabled={importingBackup}
+              onClick={() => backupInputRef.current?.click()}
+              className="min-h-[40px] px-3.5 rounded-xl bg-white border-[1.5px] border-[#CBD5E1] text-[#0E1A59] hover:border-[#0E1A59] text-xs font-extrabold inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
+            >
+              <Upload className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>{importingBackup ? 'Restaurando...' : 'Importar Backup (.json)'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleExportJson}
+              className="min-h-[40px] px-3.5 rounded-xl bg-white border-[1.5px] border-[#CBD5E1] text-[#475569] hover:text-[#0E1A59] hover:border-[#0E1A59] text-xs font-extrabold inline-flex items-center gap-1.5 transition-colors"
+            >
+              <Download className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>Exportar Backup (.json)</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>
   );
 };
+
+export default ConfigModal;

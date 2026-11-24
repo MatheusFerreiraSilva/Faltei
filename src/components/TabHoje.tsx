@@ -1,6 +1,8 @@
 import React, { useMemo, useState } from 'react';
 import {
+  AlertTriangle,
   ArrowRight,
+  BellRing,
   CalendarDays,
   CalendarX2,
   CheckCircle2,
@@ -14,6 +16,7 @@ import {
   ThumbsUp,
   Trash2,
   Users,
+  X,
 } from 'lucide-react';
 import {
   AvisoColetivo,
@@ -23,6 +26,7 @@ import {
   FaltaDetalheTipo,
   FaltaTipo,
   MateriaStats,
+  NotificationPreferences,
   PeriodoId,
   SemAulaConsenso,
   SemestreConfig,
@@ -68,6 +72,8 @@ interface TabHojeProps {
   userDisplayName?: string;
   isAdmin: boolean;
   heroMood: CumpliceMood;
+  notificationPrefs?: NotificationPreferences;
+  onActivateNotifications?: () => Promise<{ permission: NotificationPermission | 'unsupported' }>;
   onRecordFalta: (params: {
     materiaId: string;
     data: string;
@@ -112,6 +118,8 @@ export const TabHoje: React.FC<TabHojeProps> = ({
   userDisplayName,
   isAdmin,
   heroMood,
+  notificationPrefs,
+  onActivateNotifications,
   onRecordFalta,
   onDeleteFalta,
   onImportPeriodo,
@@ -134,6 +142,8 @@ export const TabHoje: React.FC<TabHojeProps> = ({
   const [avisoData, setAvisoData] = useState<string>(todayStr);
   const [avisoMsg, setAvisoMsg] = useState<string>('');
   const [publishingAviso, setPublishingAviso] = useState(false);
+  const [notifBannerDismissed, setNotifBannerDismissed] = useState(false);
+  const [activatingNotif, setActivatingNotif] = useState(false);
 
   const weekDates = useMemo(() => getWeekDatesIso(todayStr), [todayStr]);
   const weeksRemaining = useMemo(
@@ -395,6 +405,58 @@ export const TabHoje: React.FC<TabHojeProps> = ({
         </div>
       </section>
 
+      {/* Discreet Plantão Noturno Permission Banner */}
+      {typeof window !== 'undefined' &&
+        'Notification' in window &&
+        Notification.permission === 'default' &&
+        !notificationPrefs?.ativo &&
+        !notifBannerDismissed &&
+        onActivateNotifications && (
+          <section
+            data-testid="hoje-notif-banner"
+            className="bento-card p-3.5 sm:px-5 bg-white border-[#0E1A59]/25 flex flex-wrap items-center justify-between gap-3"
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-8 h-8 rounded-xl bg-[#FCE7F3] text-[#EC1580] flex items-center justify-center shrink-0">
+                <BellRing className="w-4 h-4" aria-hidden="true" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs font-extrabold text-[#0E1A59]">
+                  Plantão Noturno do Cúmplice
+                </p>
+                <p className="text-[11px] font-semibold text-[#475569] truncate">
+                  Receba um briefing às 20:30 com aulas em risco, provas e cancelamentos de amanhã.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                disabled={activatingNotif}
+                onClick={async () => {
+                  setActivatingNotif(true);
+                  try {
+                    await onActivateNotifications();
+                  } finally {
+                    setActivatingNotif(false);
+                  }
+                }}
+                className="min-h-[34px] px-3 rounded-xl bg-[#0E1A59] text-white text-[11px] font-extrabold hover:bg-[#14267D] transition-colors whitespace-nowrap"
+              >
+                {activatingNotif ? 'Ativando...' : 'Ativar lembrete'}
+              </button>
+              <button
+                type="button"
+                aria-label="Dispensar banner de notificações"
+                onClick={() => setNotifBannerDismissed(true)}
+                className="min-h-[34px] min-w-[34px] rounded-xl border border-[#CBD5E1] text-[#475569] hover:text-[#0E1A59] flex items-center justify-center"
+              >
+                <X className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
+            </div>
+          </section>
+        )}
+
       {/* Bento Card 2: Aulas de Hoje (Hero Card) */}
       <section className="bento-card p-5 sm:p-7 space-y-4" aria-labelledby="aulas-hoje-heading">
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -510,6 +572,16 @@ export const TabHoje: React.FC<TabHojeProps> = ({
                       </span>
                     )}
                   </div>
+
+                  {aula.stats?.zonaAmarela && (
+                    <div className="rounded-xl bg-amber-100 text-amber-900 border border-amber-400 px-3 py-2 text-[11px] font-extrabold flex items-start gap-2 leading-snug">
+                      <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-800" aria-hidden="true" />
+                      <span>
+                        Zona Amarela: restam apenas {formatNumberClean(aula.stats.restanteLivre)}
+                        {aula.stats.unidade === 'h' ? 'h' : ' enc.'} livres — entre em modo de contenção
+                      </span>
+                    </div>
+                  )}
 
                   {dayAvisos.length > 0 && (
                     <div className="rounded-xl bg-[#FCE7F3]/70 border border-[#EC1580]/30 px-3 py-2 text-xs text-[#0E1A59] flex items-start gap-2">

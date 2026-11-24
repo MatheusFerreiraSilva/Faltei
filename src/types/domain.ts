@@ -207,11 +207,40 @@ export interface MateriaStats {
   aulasRestantesSemestre: number;
   encontrosRestantesCota: number;
   status: RiskLevel;
+  zonaAmarela: boolean; // >= 80% e ainda não estourou
   zonaCriticaTerracota: boolean; // >= 75% ou <= 1 encontro
   traducaoHumana: string;
   fraseComica: string;
   subCotasPorDia: SubCotaDia[];
   aulasCanceladasCount: number;
+}
+
+export type NotificationScenarioType =
+  | 'risco'
+  | 'avaliacao'
+  | 'turma'
+  | 'maratona'
+  | 'livre';
+
+export interface NotificationPreferences {
+  ativo: boolean;
+  horarioNoturno: string; // "20:30"
+  alertasRisco: boolean;
+  alertasAvaliacao: boolean;
+  alertasTurma: boolean;
+  fcmToken?: string;
+  ultimoDisparoData?: string; // YYYY-MM-DD
+  updatedAt?: unknown;
+}
+
+export interface NotificationDigestPayload {
+  scenario: NotificationScenarioType;
+  title: string;
+  body: string;
+  targetDate: string;
+  targetTab: 'hoje' | 'calendario' | 'materias';
+  materiaId?: string;
+  materiaNome?: string;
 }
 
 export interface SimulacaoItem {
@@ -243,4 +272,5 @@ export interface CatalogDiffItem {
   before?: CatalogoDisciplina;
   after?: CatalogoDisciplina;
 }
+
 

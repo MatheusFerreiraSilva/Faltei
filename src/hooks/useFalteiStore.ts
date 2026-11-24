@@ -22,6 +22,8 @@ import {
   db,
   handleFirestoreError,
   OperationType,
+  registerMessagingToken,
+  subscribeForegroundMessages,
   updateFirebaseDisplayName,
 } from '../lib/firebase';
 import {
@@ -33,6 +35,9 @@ import {
   DisciplinaComunidade,
   FaltaDetalheTipo,
   FaltaTipo,
+  HorarioAula,
+  NotificationDigestPayload,
+  NotificationPreferences,
   PeriodoId,
   SemAulaConsenso,
   SemestreConfig,
@@ -44,10 +49,12 @@ import {
 } from '../types/domain';
 import {
   addDaysIso,
+  calculateMateriaStats,
   countScheduledMeetings,
   normalizeBlocosFromHorarios,
   toIsoDateLocal,
 } from '../utils/attendance';
+import { parseAndValidateBackupJson } from '../utils/backup';
 import { isStale2026Catalog } from '../utils/catalogMatcher';
 import {
   buildSemAulaConsensoId,
@@ -56,6 +63,11 @@ import {
   sanitizeAuthorDisplayName,
   slugifyDisciplinaNome,
 } from '../utils/disciplinaKey';
+import {
+  buildTomorrowDigestNotification,
+  DEFAULT_NOTIFICATION_PREFS,
+  shouldTriggerNightlyDigest,
+} from '../utils/notifications';
 
 const LOCAL_STORAGE_KEY = 'faltei_preview_state_v1';
 
@@ -72,12 +84,45 @@ interface LocalStateSnapshot {
   displayName?: string;
   periodoAtual?: PeriodoId;
   percentualPadrao?: number;
+  notificationPrefs?: NotificationPreferences;
   migratedToCloudUid?: string;
 }
 
 function generateDocId(prefix: string): string {
   const rand = Math.random().toString(36).slice(2, 8);
   return `${prefix}_${Date.now()}_${rand}`.replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+const VALID_TIME_24H_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+function normalizeTime24h(raw: unknown, fallback: string): string {
+  if (typeof raw !== 'string') return fallback;
+  const trimmed = raw.trim();
+  const singleDigit = /^(\d):([0-5]\d)$/.exec(trimmed);
+  const candidate = singleDigit ? `0${singleDigit[1]}:${singleDigit[2]}` : trimmed;
+  return VALID_TIME_24H_RE.test(candidate) ? candidate : fallback;
+}
+
+function sanitizeHorariosList(rawHorarios: HorarioAula[]): HorarioAula[] {
+  const safe = rawHorarios.slice(0, 7).map((h) => {
+    const dow = Math.min(6, Math.max(1, Math.round(Number(h.diaSemana) || 1))) as DiaSemana;
+    const horas = Math.max(0.5, Math.min(24, Number(h.horas) || 2));
+    return {
+      diaSemana: dow,
+      horarioInicio: normalizeTime24h(h.horarioInicio, '08:00'),
+      horarioFim: normalizeTime24h(h.horarioFim, '10:00'),
+      horas,
+      ...(typeof h.local === 'string' && h.local.trim()
+        ? { local: h.local.trim().slice(0, 160) }
+        : {}),
+      ...(typeof h.modalidadeTag === 'string' && h.modalidadeTag.trim()
+        ? { modalidadeTag: h.modalidadeTag.trim().slice(0, 60) }
+        : {}),
+    };
+  });
+  return safe.length > 0
+    ? safe
+    : [{ diaSemana: 1, horarioInicio: '08:00', horarioFim: '10:00', horas: 2 }];
 }
 
 function buildMateriaFromCatalogo(
@@ -153,6 +198,9 @@ export function useFalteiStore() {
   const [semAulaConsensoMap, setSemAulaConsensoMap] = useState<Record<string, SemAulaConsenso>>({});
   const [rawAvisos, setRawAvisos] = useState<AvisoColetivo[]>([]);
   const [confirmedAvisoIds, setConfirmedAvisoIds] = useState<string[]>([]);
+  const [notificationPrefs, setNotificationPrefs] = useState<NotificationPreferences>(
+    DEFAULT_NOTIFICATION_PREFS
+  );
   const [hasLocalPreviewToMigrate, setHasLocalPreviewToMigrate] = useState(false);
   const [loadingData, setLoadingData] = useState(true);
   const seededOnceRef = useRef(false);
@@ -313,6 +361,7 @@ export function useFalteiStore() {
           setSemAulaConsensoMap(stored.semAulaConsensoMap || {});
           setRawAvisos(stored.avisosColetivos || []);
           setConfirmedAvisoIds(stored.confirmedAvisoIds || []);
+          setNotificationPrefs(stored.notificationPrefs || DEFAULT_NOTIFICATION_PREFS);
         } else {
           // Autostart / preview seed with 4º Período so user immediately sees rich cockpit
           const params =
@@ -648,12 +697,40 @@ export function useFalteiStore() {
       }
     );
 
+    const notifRef = doc(db, 'users', firebaseUser.uid, 'config', 'notificacoes');
+    const unsubNotif = onSnapshot(
+      notifRef,
+      (snap) => {
+        if (cancelled) return;
+        if (snap.exists()) {
+          const d = snap.data() as Partial<NotificationPreferences>;
+          setNotificationPrefs({
+            ativo: Boolean(d.ativo),
+            horarioNoturno: normalizeTime24h(d.horarioNoturno, '20:30'),
+            alertasRisco: d.alertasRisco !== false,
+            alertasAvaliacao: d.alertasAvaliacao !== false,
+            alertasTurma: d.alertasTurma !== false,
+            ...(typeof d.fcmToken === 'string' ? { fcmToken: d.fcmToken } : {}),
+            ...(typeof d.ultimoDisparoData === 'string'
+              ? { ultimoDisparoData: d.ultimoDisparoData }
+              : {}),
+          });
+        } else {
+          setNotificationPrefs(DEFAULT_NOTIFICATION_PREFS);
+        }
+      },
+      (error) => {
+        console.warn('Notification config listener warning:', error.message);
+      }
+    );
+
     return () => {
       cancelled = true;
       unsubProfile();
       unsubMaterias();
       unsubFaltas();
       unsubEventos();
+      unsubNotif();
     };
   }, [authReady, firebaseUser, previewMode, seedSharedCatalogIfNeeded, todayStr]);
 
@@ -876,6 +953,7 @@ export function useFalteiStore() {
           nextProfilePatch?.percentualPadrao ??
           userProfile?.percentualPadrao ??
           existingStored?.percentualPadrao,
+        notificationPrefs: existingStored?.notificationPrefs ?? notificationPrefs,
         migratedToCloudUid: existingStored?.migratedToCloudUid,
       });
     },
@@ -884,6 +962,7 @@ export function useFalteiStore() {
       comunidadeMap,
       confirmedAvisoIds,
       eventos,
+      notificationPrefs,
       rawAvisos,
       semAulaConsensoMap,
       semestreConfig,
@@ -997,10 +1076,11 @@ export function useFalteiStore() {
         disciplinaKey: input.disciplinaKey,
         nome: input.nome,
       });
+      const safeHorarios = sanitizeHorariosList(input.horarios);
       const computedBlocos: BlocoAula[] = (
         input.blocosAula && input.blocosAula.length > 0
           ? input.blocosAula
-          : normalizeBlocosFromHorarios(input.horarios, input.local || '', id)
+          : normalizeBlocosFromHorarios(safeHorarios, input.local || '', id)
       ).slice(0, 14);
       const payload: UserMateria = {
         id,
@@ -1008,10 +1088,10 @@ export function useFalteiStore() {
         ...(input.catalogoId ? { catalogoId: input.catalogoId.slice(0, 128) } : {}),
         disciplinaKey,
         semestreId: semestreConfig.id,
-        nome: input.nome.trim().slice(0, 160),
+        nome: input.nome.trim().slice(0, 160) || 'Disciplina',
         local: (input.local || '').trim().slice(0, 160),
         periodo: input.periodo,
-        horarios: input.horarios.slice(0, 7),
+        horarios: safeHorarios,
         blocosAula: computedBlocos,
         regraModo: input.regraModo,
         cargaHorariaTotal: Math.max(1, Math.min(1000, Number(input.cargaHorariaTotal) || 32)),
@@ -1066,16 +1146,17 @@ export function useFalteiStore() {
     async (materiaId: string, updates: Partial<UserMateria>) => {
       const existingMat = materias.find((m) => m.id === materiaId);
       const oldKey = existingMat ? resolveDisciplinaKey(existingMat) : null;
-      const nextNome = updates.nome !== undefined ? updates.nome.trim().slice(0, 160) : existingMat?.nome || '';
+      const trimmedNome = updates.nome !== undefined ? updates.nome.trim().slice(0, 160) : '';
+      const nextNome = trimmedNome || existingMat?.nome || 'Disciplina';
       const computedNewKey =
-        existingMat && !existingMat.catalogoId && updates.nome !== undefined
+        existingMat && !existingMat.catalogoId && trimmedNome
           ? slugifyDisciplinaNome(nextNome)
           : updates.disciplinaKey || oldKey || undefined;
 
       if (!firebaseUser) {
         const next = materias.map((m) =>
           m.id === materiaId
-            ? { ...m, ...updates, ...(computedNewKey ? { disciplinaKey: computedNewKey } : {}) }
+            ? { ...m, ...updates, nome: nextNome, ...(computedNewKey ? { disciplinaKey: computedNewKey } : {}) }
             : m
         );
         const nextCom = { ...comunidadeMap };
@@ -1105,12 +1186,12 @@ export function useFalteiStore() {
       const path = `users/${firebaseUser.uid}/materias/${materiaId}`;
       try {
         const sanitized: Record<string, unknown> = { updatedAt: serverTimestamp() };
-        if (updates.nome !== undefined) sanitized.nome = nextNome;
+        if (updates.nome !== undefined && trimmedNome) sanitized.nome = nextNome;
         if (computedNewKey) sanitized.disciplinaKey = computedNewKey;
         if (updates.local !== undefined) sanitized.local = updates.local.trim().slice(0, 160);
         if (updates.periodo !== undefined) sanitized.periodo = updates.periodo;
         if (updates.horarios !== undefined) {
-          const slicedHorarios = updates.horarios.slice(0, 7);
+          const slicedHorarios = sanitizeHorariosList(updates.horarios);
           sanitized.horarios = slicedHorarios;
           if (updates.blocosAula === undefined) {
             sanitized.blocosAula = normalizeBlocosFromHorarios(
@@ -2019,11 +2100,13 @@ export function useFalteiStore() {
       } else {
         const nextId = generateDocId('mat');
         oldToNewMateriaId.set(m.id, nextId);
+        const { createdAt: _cm, updatedAt: _um, ...cleanM } = m;
         newMaterias.push({
-          ...m,
+          ...cleanM,
           id: nextId,
           userId: firebaseUser.uid,
           disciplinaKey: resolveDisciplinaKey(m),
+          horarios: sanitizeHorariosList(m.horarios || []),
         });
       }
     }
@@ -2035,8 +2118,9 @@ export function useFalteiStore() {
       if (!mappedMatId) continue;
       if (existingFaltaKeys.has(`${mappedMatId}__${f.data}`)) continue;
       existingFaltaKeys.add(`${mappedMatId}__${f.data}`);
+      const { createdAt: _cf, updatedAt: _uf, ...cleanF } = f;
       newFaltas.push({
-        ...f,
+        ...cleanF,
         id: generateDocId('flt'),
         userId: firebaseUser.uid,
         materiaId: mappedMatId,
@@ -2048,8 +2132,9 @@ export function useFalteiStore() {
     for (const ev of stored.eventos || []) {
       if (existingEventoKeys.has(`${ev.data}__${ev.tipo}__${ev.titulo}`)) continue;
       const mappedMatId = ev.materiaId ? oldToNewMateriaId.get(ev.materiaId) : undefined;
+      const { materiaId: _staleMatId, createdAt: _ce, updatedAt: _ue, ...cleanEv } = ev;
       newEventos.push({
-        ...ev,
+        ...cleanEv,
         id: generateDocId('evt'),
         userId: firebaseUser.uid,
         ...(mappedMatId ? { materiaId: mappedMatId } : {}),
@@ -2123,6 +2208,413 @@ export function useFalteiStore() {
     }));
   }, [confirmedAvisoIds, firebaseUser?.uid, materias, rawAvisos]);
 
+  const updateNotificationPrefs = useCallback(
+    async (patch: Partial<NotificationPreferences>): Promise<{ permission: NotificationPermission | 'unsupported' }> => {
+      let permission: NotificationPermission | 'unsupported' =
+        typeof window !== 'undefined' && 'Notification' in window
+          ? Notification.permission
+          : 'unsupported';
+
+      let nextAtivo = patch.ativo !== undefined ? patch.ativo : notificationPrefs.ativo;
+      let nextFcmToken = patch.fcmToken ?? notificationPrefs.fcmToken;
+
+      if (patch.ativo === true && permission === 'default' && 'Notification' in window) {
+        try {
+          permission = await Notification.requestPermission();
+        } catch {
+          permission = Notification.permission;
+        }
+      }
+
+      if (patch.ativo === true && permission === 'denied') {
+        nextAtivo = false;
+      }
+
+      if (nextAtivo && permission === 'granted') {
+        const token = await registerMessagingToken();
+        if (token) nextFcmToken = token;
+      }
+
+      const nextPrefs: NotificationPreferences = {
+        ativo: nextAtivo,
+        horarioNoturno: normalizeTime24h(
+          patch.horarioNoturno,
+          normalizeTime24h(notificationPrefs.horarioNoturno, '20:30')
+        ),
+        alertasRisco:
+          patch.alertasRisco !== undefined ? patch.alertasRisco : notificationPrefs.alertasRisco,
+        alertasAvaliacao:
+          patch.alertasAvaliacao !== undefined
+            ? patch.alertasAvaliacao
+            : notificationPrefs.alertasAvaliacao,
+        alertasTurma:
+          patch.alertasTurma !== undefined ? patch.alertasTurma : notificationPrefs.alertasTurma,
+        ...(nextFcmToken ? { fcmToken: nextFcmToken.slice(0, 512) } : {}),
+        ...(patch.ultimoDisparoData || notificationPrefs.ultimoDisparoData
+          ? { ultimoDisparoData: patch.ultimoDisparoData || notificationPrefs.ultimoDisparoData }
+          : {}),
+      };
+
+      setNotificationPrefs(nextPrefs);
+
+      if (!firebaseUser) {
+        const stored = readLocalState();
+        if (stored) {
+          writeLocalState({ ...stored, notificationPrefs: nextPrefs });
+        } else {
+          writeLocalState({
+            materias,
+            faltas,
+            eventos,
+            notificationPrefs: nextPrefs,
+          });
+        }
+        return { permission };
+      }
+
+      const path = `users/${firebaseUser.uid}/config/notificacoes`;
+      try {
+        await setDoc(doc(db, 'users', firebaseUser.uid, 'config', 'notificacoes'), {
+          ...nextPrefs,
+          updatedAt: serverTimestamp(),
+        });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, path);
+      }
+
+      return { permission };
+    },
+    [eventos, faltas, firebaseUser, materias, notificationPrefs]
+  );
+
+  const showSystemNotification = useCallback(async (payload: NotificationDigestPayload) => {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      return { shown: false, reason: 'Navegador sem suporte a notificações.' };
+    }
+    let perm = Notification.permission;
+    if (perm === 'default') {
+      try {
+        perm = await Notification.requestPermission();
+      } catch {
+        perm = Notification.permission;
+      }
+    }
+    if (perm !== 'granted') {
+      return {
+        shown: false,
+        reason: 'Permissão de notificações não concedida neste navegador.',
+      };
+    }
+
+    const notifOptions: NotificationOptions & { vibrate?: number[] } = {
+      body: payload.body,
+      icon: '/icon-192.svg',
+      badge: '/icon-rounded.svg',
+      vibrate: [120, 60, 120],
+      tag: 'faltei-cumplice-digest',
+      data: {
+        url: `/?tab=${payload.targetTab}${
+          payload.materiaId ? `&materiaId=${encodeURIComponent(payload.materiaId)}` : ''
+        }`,
+        tab: payload.targetTab,
+        ...(payload.materiaId ? { materiaId: payload.materiaId } : {}),
+      },
+    };
+
+    try {
+      if ('serviceWorker' in navigator) {
+        const reg = await Promise.race([
+          navigator.serviceWorker.ready,
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 1200)),
+        ]);
+        if (reg && typeof reg.showNotification === 'function') {
+          await reg.showNotification(payload.title, notifOptions);
+          return { shown: true };
+        }
+      }
+      new Notification(payload.title, {
+        body: payload.body,
+        icon: '/icon-192.svg',
+      });
+      return { shown: true };
+    } catch {
+      return {
+        shown: false,
+        reason: 'Não foi possível exibir a notificação do sistema neste dispositivo.',
+      };
+    }
+  }, []);
+
+  const testCumpliceNotification = useCallback(async () => {
+    const statsList = materias.map((m) =>
+      calculateMateriaStats(m, faltas, semestreConfig, todayStr)
+    );
+    const payload = buildTomorrowDigestNotification({
+      todayStr,
+      semestreConfig,
+      materias,
+      statsList,
+      faltas,
+      eventos,
+      avisosColetivos,
+      semAulaConsensoMap,
+      currentUserUid: firebaseUser?.uid || 'local_preview',
+      prefs: notificationPrefs,
+    });
+
+    const result = await showSystemNotification(payload);
+    return { ...result, payload };
+  }, [
+    avisosColetivos,
+    eventos,
+    faltas,
+    firebaseUser?.uid,
+    materias,
+    notificationPrefs,
+    semAulaConsensoMap,
+    semestreConfig,
+    showSystemNotification,
+    todayStr,
+  ]);
+
+  // Foreground FCM messages & background nightly briefing scheduler ("Plantão Noturno do Cúmplice")
+  useEffect(() => {
+    let unsubFcm: (() => void) | null = null;
+    if (firebaseUser) {
+      void subscribeForegroundMessages((incomingMsg) => {
+        if (!incomingMsg.title) return;
+        void showSystemNotification({
+          scenario: 'maratona',
+          title: incomingMsg.title,
+          body: incomingMsg.body || '',
+          targetDate: todayStr,
+          targetTab: 'hoje',
+        });
+      }).then((fn) => {
+        unsubFcm = fn;
+      });
+    }
+    return () => {
+      if (unsubFcm) unsubFcm();
+    };
+  }, [firebaseUser, showSystemNotification, todayStr]);
+
+  useEffect(() => {
+    if (!notificationPrefs.ativo) return;
+    if (typeof window === 'undefined' || !('Notification' in window)) return;
+
+    const checkAndFireNightly = async () => {
+      if (Notification.permission !== 'granted') return;
+      if (
+        !shouldTriggerNightlyDigest({
+          prefs: notificationPrefs,
+          now: new Date(),
+          todayStr,
+        })
+      ) {
+        return;
+      }
+
+      const statsList = materias.map((m) =>
+        calculateMateriaStats(m, faltas, semestreConfig, todayStr)
+      );
+      const payload = buildTomorrowDigestNotification({
+        todayStr,
+        semestreConfig,
+        materias,
+        statsList,
+        faltas,
+        eventos,
+        avisosColetivos,
+        semAulaConsensoMap,
+        currentUserUid: firebaseUser?.uid || 'local_preview',
+        prefs: notificationPrefs,
+      });
+
+      const res = await showSystemNotification(payload);
+      if (res.shown) {
+        await updateNotificationPrefs({ ultimoDisparoData: todayStr });
+        if (firebaseUser) {
+          try {
+            const idToken = await firebaseUser.getIdToken();
+            await fetch('/api/notifications/digest', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${idToken}`,
+              },
+              body: JSON.stringify(payload),
+            });
+          } catch {
+            // Optional backend digest audit hook
+          }
+        }
+      }
+    };
+
+    void checkAndFireNightly();
+    const timer = window.setInterval(() => {
+      void checkAndFireNightly();
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, [
+    avisosColetivos,
+    eventos,
+    faltas,
+    firebaseUser,
+    materias,
+    notificationPrefs,
+    semAulaConsensoMap,
+    semestreConfig,
+    showSystemNotification,
+    todayStr,
+    updateNotificationPrefs,
+  ]);
+
+  const importBackupJson = useCallback(
+    async (rawText: string) => {
+      const uid = firebaseUser?.uid || 'local_preview';
+      const restored = parseAndValidateBackupJson(rawText, {
+        targetUserId: uid,
+        defaultSemestreId: semestreConfig.id,
+      });
+
+      if (!firebaseUser) {
+        const nextCom: Record<string, DisciplinaComunidade> = { ...comunidadeMap };
+        for (const m of restored.materias) {
+          const key = resolveDisciplinaKey(m);
+          if (!nextCom[key]) {
+            nextCom[key] = {
+              key,
+              semestreId: m.semestreId,
+              nome: m.nome,
+              ...(m.catalogoId ? { catalogoId: m.catalogoId } : {}),
+              inscritosCount: 1,
+            };
+          }
+        }
+        setMaterias(restored.materias);
+        setFaltas(restored.faltas);
+        setEventos(restored.eventos);
+        setComunidadeMap(nextCom);
+        if (restored.profilePatch) {
+          setUserProfile((prev) => ({
+            uid: prev?.uid || 'local_preview',
+            email: prev?.email || 'Preview local (sem e-mail)',
+            displayName: restored.profilePatch?.displayName || prev?.displayName || 'Estudante',
+            role: 'student',
+            periodoAtual: restored.profilePatch?.periodoAtual || prev?.periodoAtual,
+            percentualPadrao: restored.profilePatch?.percentualPadrao ?? prev?.percentualPadrao,
+          }));
+        }
+        syncLocal(
+          restored.materias,
+          restored.faltas,
+          undefined,
+          undefined,
+          nextCom,
+          undefined,
+          undefined,
+          restored.eventos,
+          undefined,
+          restored.profilePatch
+        );
+        return {
+          materias: restored.materias.length,
+          faltas: restored.faltas.length,
+          eventos: restored.eventos.length,
+        };
+      }
+
+      const path = `users/${firebaseUser.uid}`;
+      try {
+        // Limpa documentos antigos do usuário em lotes seguros antes de restaurar o snapshot
+        const deleteRefs = [
+          ...faltas.map((f) => doc(db, 'users', firebaseUser.uid, 'faltas', f.id)),
+          ...eventos.map((e) => doc(db, 'users', firebaseUser.uid, 'eventos', e.id)),
+          ...materias.map((m) => doc(db, 'users', firebaseUser.uid, 'materias', m.id)),
+        ];
+        for (let i = 0; i < deleteRefs.length; i += 400) {
+          const batch = writeBatch(db);
+          for (const ref of deleteRefs.slice(i, i + 400)) {
+            batch.delete(ref);
+          }
+          await batch.commit();
+        }
+
+        // Grava matérias primeiro (para atender às regras Master Gate de faltas/eventos)
+        for (let i = 0; i < restored.materias.length; i += 400) {
+          const batch = writeBatch(db);
+          for (const m of restored.materias.slice(i, i + 400)) {
+            batch.set(doc(db, 'users', firebaseUser.uid, 'materias', m.id), {
+              ...m,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+          }
+          await batch.commit();
+        }
+
+        const dependentWrites = [
+          ...restored.faltas.map((f) => ({
+            ref: doc(db, 'users', firebaseUser.uid, 'faltas', f.id),
+            data: f,
+          })),
+          ...restored.eventos.map((ev) => ({
+            ref: doc(db, 'users', firebaseUser.uid, 'eventos', ev.id),
+            data: ev,
+          })),
+        ];
+        for (let i = 0; i < dependentWrites.length; i += 400) {
+          const batch = writeBatch(db);
+          for (const item of dependentWrites.slice(i, i + 400)) {
+            batch.set(item.ref, {
+              ...item.data,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+          }
+          await batch.commit();
+        }
+
+        if (restored.profilePatch) {
+          await updateUserPreferences(restored.profilePatch);
+        }
+
+        for (const m of restored.materias) {
+          const key = resolveDisciplinaKey(m);
+          syncedKeysRef.current.add(`${firebaseUser.uid}:${key}`);
+          void ensureCommunityEnrollment(
+            firebaseUser.uid,
+            key,
+            m.nome,
+            m.semestreId,
+            m.catalogoId
+          );
+        }
+
+        return {
+          materias: restored.materias.length,
+          faltas: restored.faltas.length,
+          eventos: restored.eventos.length,
+        };
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, path);
+      }
+    },
+    [
+      comunidadeMap,
+      ensureCommunityEnrollment,
+      eventos,
+      faltas,
+      firebaseUser,
+      materias,
+      semestreConfig.id,
+      syncLocal,
+      updateUserPreferences,
+    ]
+  );
+
   return {
     authReady,
     firebaseUser,
@@ -2144,6 +2636,7 @@ export function useFalteiStore() {
     comunidadeMap,
     semAulaConsensoMap,
     avisosColetivos,
+    notificationPrefs,
     importPeriodo,
     addMateria,
     updateMateria,
@@ -2158,7 +2651,10 @@ export function useFalteiStore() {
     confirmAvisoColetivo,
     deleteAvisoColetivo,
     updateUserPreferences,
+    updateNotificationPrefs,
+    testCumpliceNotification,
     applyDefaultPercentualAll,
+    importBackupJson,
     updateSemestreConfig,
     publishCatalogUpdate,
   };

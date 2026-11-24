@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Check, Clock, RotateCcw, Trash2, Users, X } from 'lucide-react';
+import { AlertTriangle, Check, Clock, RotateCcw, Trash2, Users, X } from 'lucide-react';
 import {
   DiaSemana,
   DisciplinaComunidade,
@@ -181,6 +181,15 @@ export const MateriaDrawer: React.FC<MateriaDrawerProps> = ({
               </span>
             </div>
             <p className="text-xs font-bold text-[#0E1A59]">{stats.traducaoHumana}</p>
+            {stats.zonaAmarela && (
+              <div className="rounded-xl bg-amber-100 text-amber-900 border border-amber-400 px-3 py-2 text-xs font-extrabold flex items-start gap-2 leading-snug">
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-800" aria-hidden="true" />
+                <span>
+                  Zona Amarela: restam apenas {formatNumberClean(stats.restanteLivre)}
+                  {stats.unidade === 'h' ? 'h' : ' enc.'} livres — entre em modo de contenção
+                </span>
+              </div>
+            )}
             <p className="text-xs text-[#475569]">{stats.fraseComica}</p>
           </div>
 

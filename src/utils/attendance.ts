@@ -569,6 +569,7 @@ export function calculateMateriaStats(
       status = 'ATENÇÃO';
     }
 
+    const zonaAmarela = percentualConsumido >= 80 && status !== 'ESTOURADO';
     const zonaCriticaTerracota = percentualConsumido >= 75 || status === 'CRÍTICO' || status === 'ESTOURADO';
 
     return {
@@ -584,6 +585,7 @@ export function calculateMateriaStats(
       aulasRestantesSemestre,
       encontrosRestantesCota,
       status,
+      zonaAmarela,
       zonaCriticaTerracota,
       traducaoHumana: buildHumanTranslation(materia, restanteLivre, 'encontros', [], aulasRestantesSemestre),
       fraseComica: getComicAlertByStatus(status, encontrosRestantesCota, materia.nome),
@@ -685,6 +687,7 @@ export function calculateMateriaStats(
     status = 'SEGURO';
   }
 
+  const zonaAmarela = effectivePct >= 80 && status !== 'ESTOURADO';
   const zonaCriticaTerracota = effectivePct >= 75 || status === 'CRÍTICO' || status === 'ESTOURADO';
 
   return {
@@ -700,6 +703,7 @@ export function calculateMateriaStats(
     aulasRestantesSemestre,
     encontrosRestantesCota,
     status,
+    zonaAmarela,
     zonaCriticaTerracota,
     traducaoHumana: buildHumanTranslation(materia, restanteLivre, 'h', subCotasPorDia, aulasRestantesSemestre),
     fraseComica: getComicAlertByStatus(status, encontrosRestantesCota, materia.nome),

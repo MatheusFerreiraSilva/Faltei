@@ -41,6 +41,13 @@ import {
   getMonthLabelPtBr,
   shiftYearMonth,
 } from './calendar';
+import {
+  buildTomorrowDigestNotification,
+  DEFAULT_NOTIFICATION_PREFS,
+  isIosNonStandaloneSafari,
+  shouldTriggerNightlyDigest,
+} from './notifications';
+import { parseAndValidateBackupJson, serializeBackupPayload } from './backup';
 
 const baseMateriaHoras: UserMateria = {
   id: 'mat_urinario',
@@ -829,6 +836,222 @@ test('Block 1: weeklyGrid builds proportional 52px/h blocks, hides Saturday unle
   assert.equal(model6.hasSaturday, true);
   assert.equal(model6.columns.length, 6);
 });
+
+test('Zona Amarela triggers at >= 80% before busting and clears below 80% or when ESTOURADO', () => {
+  // 100h subject (2h/class) => 25h quota => 20h used = 80% (5h left = 2 encounters, Zona Amarela = true, not ESTOURADO)
+  const mat100: UserMateria = {
+    ...baseMateriaHoras,
+    id: 'mat_100h',
+    horarios: [{ diaSemana: 5, horarioInicio: '08:00', horarioFim: '10:00', horas: 2 }],
+    cargaHorariaTotal: 100,
+    percentualLimite: 25,
+  };
+  const s75 = calculateMateriaStats(
+    mat100,
+    [{ id: 'fa', userId: 'u1', materiaId: 'mat_100h', data: '2026-09-04', diaSemana: 5, horas: 18, tipo: 'falta' }],
+    SEMESTRE_2026_2,
+    '2026-11-23'
+  );
+  assert.equal(s75.zonaAmarela, false);
+
+  const s80 = calculateMateriaStats(
+    mat100,
+    [{ id: 'fb', userId: 'u1', materiaId: 'mat_100h', data: '2026-09-04', diaSemana: 5, horas: 20, tipo: 'falta' }],
+    SEMESTRE_2026_2,
+    '2026-11-23'
+  );
+  assert.equal(s80.percentualConsumido, 80);
+  assert.equal(s80.zonaAmarela, true);
+  assert.equal(s80.status, 'ATENÇÃO');
+
+  const s100 = calculateMateriaStats(
+    mat100,
+    [{ id: 'fc', userId: 'u1', materiaId: 'mat_100h', data: '2026-09-04', diaSemana: 5, horas: 25, tipo: 'falta' }],
+    SEMESTRE_2026_2,
+    '2026-11-23'
+  );
+  assert.equal(s100.status, 'ESTOURADO');
+  assert.equal(s100.zonaAmarela, false);
+});
+
+test('Nightly briefing engine prioritizes all 5 humorous scenarios and respects holidays & sem_aula', () => {
+  const matThu: UserMateria = {
+    ...baseMateriaHoras,
+    id: 'mat_thu',
+    nome: 'Semiologia Médica',
+    local: 'HUGG',
+    horarios: [
+      { diaSemana: 4, horarioInicio: '08:00', horarioFim: '12:00', horas: 4 },
+      { diaSemana: 4, horarioInicio: '13:00', horarioFim: '15:00', horas: 2 },
+    ],
+    cargaHorariaTotal: 100,
+  };
+
+  // Tomorrow is Thursday 2026-09-10 (todayStr = 2026-09-09)
+  // Scenario 1: Risco (>= 80%)
+  const statsRisk = calculateMateriaStats(
+    matThu,
+    [{ id: 'r1', userId: 'u1', materiaId: 'mat_thu', data: '2026-08-27', diaSemana: 4, horas: 21, tipo: 'falta' }],
+    SEMESTRE_2026_2,
+    '2026-09-09'
+  );
+  const d1 = buildTomorrowDigestNotification({
+    todayStr: '2026-09-09',
+    semestreConfig: SEMESTRE_2026_2,
+    materias: [matThu],
+    statsList: [statsRisk],
+    faltas: [],
+    eventos: [
+      {
+        id: 'ev1',
+        userId: 'u1',
+        materiaId: 'mat_thu',
+        disciplinaNome: matThu.nome,
+        semestreId: '2026.2',
+        data: '2026-09-10',
+        tipo: 'prova',
+        titulo: 'P1',
+      },
+    ],
+  });
+  assert.equal(d1.scenario, 'risco');
+  assert.match(d1.title, /Alerta de sobrevivência/);
+  assert.match(d1.body, /HUGG/);
+  assert.match(d1.body, /4h de margem/);
+
+  // Scenario 2: Avaliação when risco disabled or safe
+  const statsSafe = calculateMateriaStats(matThu, [], SEMESTRE_2026_2, '2026-09-09');
+  const d2 = buildTomorrowDigestNotification({
+    todayStr: '2026-09-09',
+    semestreConfig: SEMESTRE_2026_2,
+    materias: [matThu],
+    statsList: [statsSafe],
+    faltas: [],
+    eventos: [
+      {
+        id: 'ev1',
+        userId: 'u1',
+        materiaId: 'mat_thu',
+        disciplinaNome: matThu.nome,
+        semestreId: '2026.2',
+        data: '2026-09-10',
+        tipo: 'prova',
+        titulo: 'P1 Prática',
+        horario: '09:30',
+      },
+    ],
+  });
+  assert.equal(d2.scenario, 'avaliacao');
+  assert.match(d2.title, /Dia inegociável/);
+  assert.match(d2.body, /P1 Prática/);
+
+  // Scenario 3: Consenso da Turma
+  const keyThu = resolveDisciplinaKey(matThu);
+  const cId = buildSemAulaConsensoId('2026.2', keyThu, '2026-09-10');
+  const d3 = buildTomorrowDigestNotification({
+    todayStr: '2026-09-09',
+    semestreConfig: SEMESTRE_2026_2,
+    materias: [matThu],
+    statsList: [statsSafe],
+    faltas: [],
+    eventos: [],
+    semAulaConsensoMap: {
+      [cId]: {
+        id: cId,
+        disciplinaKey: keyThu,
+        disciplinaNome: matThu.nome,
+        semestreId: '2026.2',
+        data: '2026-09-10',
+        votosCount: 4,
+      },
+    },
+  });
+  assert.equal(d3.scenario, 'turma');
+  assert.match(d3.body, /4 colegas marcaram 'Sem Aula'/);
+
+  // Scenario 4: Maratona >= 6h (Manhã + Tarde)
+  const d4 = buildTomorrowDigestNotification({
+    todayStr: '2026-09-09',
+    semestreConfig: SEMESTRE_2026_2,
+    materias: [matThu],
+    statsList: [statsSafe],
+    faltas: [],
+    eventos: [],
+  });
+  assert.equal(d4.scenario, 'maratona');
+  assert.match(d4.title, /plantão de 6h/);
+  assert.match(d4.body, /Manhã \+ Tarde/);
+
+  // Scenario 5: Dia Livre (Holiday 2026-09-07 or sem_aula recorded for tomorrow)
+  const d5Holiday = buildTomorrowDigestNotification({
+    todayStr: '2026-09-06',
+    semestreConfig: SEMESTRE_2026_2,
+    materias: [{ ...baseMateriaHoras, horarios: [{ diaSemana: 1, horarioInicio: '08:00', horarioFim: '12:00', horas: 4 }] }],
+    statsList: [statsSafe],
+    faltas: [],
+    eventos: [],
+  });
+  assert.equal(d5Holiday.scenario, 'livre');
+  assert.match(d5Holiday.title, /Passe livre/);
+
+  const d5SemAula = buildTomorrowDigestNotification({
+    todayStr: '2026-09-09',
+    semestreConfig: SEMESTRE_2026_2,
+    materias: [matThu],
+    statsList: [statsSafe],
+    faltas: [{ id: 'sa', userId: 'u1', materiaId: 'mat_thu', data: '2026-09-10', diaSemana: 4, horas: 6, tipo: 'sem_aula' }],
+    eventos: [],
+  });
+  assert.equal(d5SemAula.scenario, 'livre');
+
+  // Scheduler & iOS standalone check
+  assert.equal(
+    shouldTriggerNightlyDigest({
+      prefs: { ...DEFAULT_NOTIFICATION_PREFS, ativo: true, horarioNoturno: '20:30' },
+      now: new Date(2026, 8, 9, 20, 35, 0),
+      todayStr: '2026-09-09',
+    }),
+    true
+  );
+  assert.equal(
+    shouldTriggerNightlyDigest({
+      prefs: { ...DEFAULT_NOTIFICATION_PREFS, ativo: true, horarioNoturno: '20:30', ultimoDisparoData: '2026-09-09' },
+      now: new Date(2026, 8, 9, 21, 0, 0),
+      todayStr: '2026-09-09',
+    }),
+    false
+  );
+  assert.equal(isIosNonStandaloneSafari('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)', false), true);
+  assert.equal(isIosNonStandaloneSafari('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)', true), false);
+});
+
+test('Backup JSON serializer and validator round-trip valid backups and reject corrupted files', () => {
+  const payload = serializeBackupPayload({
+    semestre: SEMESTRE_2026_2,
+    profile: { uid: 'u1', email: 'a@b.com', displayName: 'Ana', role: 'student' },
+    displayName: 'Ana',
+    periodoAtual: '4',
+    percentualPadrao: 25,
+    materias: [baseMateriaHoras],
+    faltas: [{ id: 'f1', userId: 'u1', materiaId: baseMateriaHoras.id, data: '2026-09-04', diaSemana: 5, horas: 4, tipo: 'falta' }],
+    eventos: [{ id: 'e1', userId: 'u1', materiaId: baseMateriaHoras.id, disciplinaNome: 'Sistema Urinário', semestreId: '2026.2', data: '2026-09-18', tipo: 'prova', titulo: 'Prova 1' }],
+  });
+
+  const restored = parseAndValidateBackupJson(JSON.stringify(payload), {
+    targetUserId: 'u2',
+    defaultSemestreId: '2026.2',
+  });
+  assert.equal(restored.materias.length, 1);
+  assert.equal(restored.materias[0].userId, 'u2');
+  assert.equal(restored.faltas.length, 1);
+  assert.equal(restored.faltas[0].materiaId, restored.materias[0].id);
+  assert.equal(restored.eventos.length, 1);
+  assert.equal(restored.eventos[0].materiaId, restored.materias[0].id);
+
+  assert.throws(() => parseAndValidateBackupJson('not json', { targetUserId: 'u2', defaultSemestreId: '2026.2' }));
+  assert.throws(() => parseAndValidateBackupJson('{"materias":"invalid"}', { targetUserId: 'u2', defaultSemestreId: '2026.2' }));
+});
+
 
 
 

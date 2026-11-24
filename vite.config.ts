@@ -63,6 +63,7 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          importScripts: ['/sw-notifications.js'],
           cleanupOutdatedCaches: true,
           skipWaiting: true,
           clientsClaim: true,
@@ -128,8 +129,20 @@ export default defineConfig(() => {
         '@': path.resolve(import.meta.dirname, '.'),
       },
     },
+    build: {
+      rolldownOptions: {
+        output: {
+          manualChunks(id: string) {
+            if (id.includes('/node_modules/firebase/') || id.includes('/node_modules/@firebase/')) {
+              return 'firebase';
+            }
+          },
+        },
+      },
+    },
     server: {
-      hmr: process.env.DISABLE_HMR !== 'true',
+      hmr: false as const,
+      ws: false as const,
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
     },
   };

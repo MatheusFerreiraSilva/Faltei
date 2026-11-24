@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { ChevronRight, ShieldAlert, Users } from 'lucide-react';
+import { AlertTriangle, ChevronRight, ShieldAlert, Sparkles, Users } from 'lucide-react';
 import { DisciplinaComunidade, MateriaStats, PeriodoId } from '../types/domain';
 import {
   DIA_SEMANA_LABELS,
@@ -14,6 +14,7 @@ interface TabMateriasProps {
   comunidadeMap: Record<string, DisciplinaComunidade>;
   onSelectMateria: (materiaId: string) => void;
   onOpenGrade: () => void;
+  onOpenWrapped?: () => void;
 }
 
 type FilterMode = 'todas' | 'risco' | PeriodoId;
@@ -23,6 +24,7 @@ export const TabMaterias: React.FC<TabMateriasProps> = ({
   comunidadeMap,
   onSelectMateria,
   onOpenGrade,
+  onOpenWrapped,
 }) => {
   const [filter, setFilter] = useState<FilterMode>('todas');
 
@@ -121,6 +123,16 @@ export const TabMaterias: React.FC<TabMateriasProps> = ({
               </button>
             );
           })}
+          {onOpenWrapped && (
+            <button
+              type="button"
+              onClick={onOpenWrapped}
+              className="min-h-[38px] px-3.5 py-1.5 rounded-full bg-[#0E1A59] text-white text-[11px] font-extrabold whitespace-nowrap shrink-0 inline-flex items-center gap-1.5 hover:bg-[#14267D] transition-colors"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-[#EC1580]" aria-hidden="true" />
+              <span>faltei. Wrapped</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -190,8 +202,17 @@ export const TabMaterias: React.FC<TabMateriasProps> = ({
                     </div>
                   </div>
 
-                  {/* Tradução humana */}
-                  <div className="space-y-1">
+                  {/* Tradução humana + Zona Amarela (>= 80%) */}
+                  <div className="space-y-1.5">
+                    {stats.zonaAmarela && (
+                      <div className="rounded-xl bg-amber-100 text-amber-900 border border-amber-400 px-2.5 py-1.5 text-[11px] font-extrabold flex items-start gap-1.5 leading-snug">
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-800" aria-hidden="true" />
+                        <span>
+                          Zona Amarela: restam apenas {formatNumberClean(stats.restanteLivre)}
+                          {stats.unidade === 'h' ? 'h' : ' enc.'} livres — entre em modo de contenção
+                        </span>
+                      </div>
+                    )}
                     <p className="text-xs font-bold text-[#0E1A59] leading-relaxed">
                       {stats.traducaoHumana}
                     </p>

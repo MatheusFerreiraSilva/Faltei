@@ -1,4 +1,5 @@
-import express from 'express';
+import express, { NextFunction, Request, Response } from 'express';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
@@ -9,6 +10,120 @@ dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+interface AuthenticatedRequest extends Request {
+  authUser?: {
+    uid: string;
+    email?: string;
+    emailVerified?: boolean;
+  };
+}
+
+let cachedFirebaseApiKey: string | null = null;
+function getFirebaseWebApiKey(): string {
+  if (cachedFirebaseApiKey) return cachedFirebaseApiKey;
+  try {
+    const raw = fs.readFileSync(path.resolve(__dirname, 'firebase-applet-config.json'), 'utf8');
+    const parsed = JSON.parse(raw) as { apiKey?: string };
+    if (typeof parsed.apiKey === 'string' && parsed.apiKey.trim()) {
+      cachedFirebaseApiKey = parsed.apiKey.trim();
+      return cachedFirebaseApiKey;
+    }
+  } catch {
+    // Fallback to env var if config file absent
+  }
+  const envKey = process.env.FIREBASE_WEB_API_KEY || process.env.VITE_FIREBASE_API_KEY || '';
+  cachedFirebaseApiKey = envKey.trim();
+  return cachedFirebaseApiKey;
+}
+
+async function verifyFirebaseIdToken(
+  idToken: string
+): Promise<{ uid: string; email?: string; emailVerified?: boolean } | null> {
+  const apiKey = getFirebaseWebApiKey();
+  if (!apiKey || !idToken) return null;
+  try {
+    const resp = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }),
+      }
+    );
+    if (!resp.ok) return null;
+    const data = (await resp.json()) as {
+      users?: Array<{ localId?: string; email?: string; emailVerified?: boolean }>;
+    };
+    const user = data.users?.[0];
+    if (!user?.localId) return null;
+    return {
+      uid: user.localId,
+      email: user.email,
+      emailVerified: Boolean(user.emailVerified),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function requireFirebaseAuth(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+) {
+  const authHeader = req.headers.authorization;
+  if (typeof authHeader !== 'string' || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({
+      error: 'Autenticação obrigatória. Envie Authorization: Bearer <firebaseIdToken>.',
+    });
+  }
+  const token = authHeader.slice(7).trim();
+  if (!token || token.length > 8192) {
+    return res.status(401).json({ error: 'Token de autenticação inválido.' });
+  }
+  const verified = await verifyFirebaseIdToken(token);
+  if (!verified) {
+    return res.status(401).json({ error: 'Sessão expirada ou token inválido. Faça login novamente.' });
+  }
+  req.authUser = verified;
+  return next();
+}
+
+const ADMIN_EMAIL = 'mat.ben.henrique@gmail.com';
+function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  if (!req.authUser?.emailVerified || req.authUser?.email !== ADMIN_EMAIL) {
+    return res.status(403).json({
+      error: 'Acesso restrito ao administrador verificado para atualização do catálogo.',
+    });
+  }
+  return next();
+}
+
+const GEMINI_WINDOW_MS = 60 * 60 * 1000;
+const GEMINI_MAX_REQUESTS_PER_HOUR = 12;
+const geminiRateMap = new Map<string, number[]>();
+
+function geminiRateLimiter(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  const uid = req.authUser?.uid;
+  if (!uid) {
+    return res.status(401).json({ error: 'Usuário não autenticado.' });
+  }
+  const now = Date.now();
+  const cutoff = now - GEMINI_WINDOW_MS;
+  const timestamps = (geminiRateMap.get(uid) || []).filter((ts) => ts > cutoff);
+  if (timestamps.length >= GEMINI_MAX_REQUESTS_PER_HOUR) {
+    const oldest = timestamps[0];
+    const retryAfterSec = Math.max(1, Math.ceil((oldest + GEMINI_WINDOW_MS - now) / 1000));
+    res.setHeader('Retry-After', String(retryAfterSec));
+    return res.status(429).json({
+      error: 'Limite de 12 extrações por hora atingido. Aguarde antes de tentar novamente.',
+    });
+  }
+  timestamps.push(now);
+  geminiRateMap.set(uid, timestamps);
+  return next();
+}
 
 const ALLOWED_IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/heic', 'image/heif']);
 const ALLOWED_CATALOG_MIMES = new Set([
@@ -48,8 +163,12 @@ async function startServer() {
     res.json({ ok: true, service: 'faltei-api' });
   });
 
-  // 1. Gemini Vision: Ler Print da Grade
-  app.post('/api/gemini/parse-schedule', async (req, res) => {
+  // 1. Gemini Vision: Ler Print da Grade (Autenticado + Rate limit 12/h por UID)
+  app.post(
+    '/api/gemini/parse-schedule',
+    requireFirebaseAuth,
+    geminiRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
     try {
       const { imageBase64, mimeType } = req.body ?? {};
       if (typeof imageBase64 !== 'string' || !imageBase64.trim()) {
@@ -138,8 +257,13 @@ async function startServer() {
     }
   });
 
-  // 2. Gemini Structured Outputs: Atualizador de Semestre / Catálogo (ex: 2027.1)
-  app.post('/api/gemini/parse-catalog', async (req, res) => {
+  // 2. Gemini Structured Outputs: Atualizador de Semestre / Catálogo (Admin verificado + Rate limit 12/h)
+  app.post(
+    '/api/gemini/parse-catalog',
+    requireFirebaseAuth,
+    requireAdmin,
+    geminiRateLimiter,
+    async (req: AuthenticatedRequest, res) => {
     try {
       const { fileBase64, mimeType, textContent, semestreHint } = req.body ?? {};
       const hasFile = typeof fileBase64 === 'string' && fileBase64.trim().length > 0;
@@ -258,10 +382,84 @@ async function startServer() {
     }
   });
 
+  // 3. Notificações Push ("Plantão Noturno do Cúmplice") — Rota autenticada para Cloud Scheduler / Digest
+  app.post('/api/notifications/digest', requireFirebaseAuth, async (req: AuthenticatedRequest, res) => {
+    const uid = req.authUser?.uid;
+    const { title, body, scenario, targetDate, targetTab } = req.body ?? {};
+    const safeTitle =
+      typeof title === 'string' && title.trim()
+        ? title.trim().slice(0, 140)
+        : 'faltei. — Plantão Noturno do Cúmplice';
+    const safeBody =
+      typeof body === 'string' && body.trim()
+        ? body.trim().slice(0, 300)
+        : 'Confira suas aulas de amanhã e o saldo da sua cota no app.';
+
+    return res.json({
+      ok: true,
+      uid,
+      scheduledAt: new Date().toISOString(),
+      digest: {
+        scenario: typeof scenario === 'string' ? scenario : 'maratona',
+        title: safeTitle,
+        body: safeBody,
+        targetDate: typeof targetDate === 'string' ? targetDate : null,
+        targetTab: typeof targetTab === 'string' ? targetTab : 'hoje',
+      },
+    });
+  });
+
   // Vite dev middleware or static dist serving
   if (process.env.NODE_ENV !== 'production') {
+    app.get('/@vite/client', (_req, res) => {
+      res.type('application/javascript').send(`
+const sheetsMap = new Map();
+export function updateStyle(id, content) {
+  let style = sheetsMap.get(id);
+  if (!style) {
+    style = document.createElement('style');
+    style.setAttribute('type', 'text/css');
+    style.setAttribute('data-vite-dev-id', id);
+    style.textContent = content;
+    document.head.appendChild(style);
+    sheetsMap.set(id, style);
+  } else if (style.textContent !== content) {
+    style.textContent = content;
+  }
+}
+export function removeStyle(id) {
+  const style = sheetsMap.get(id);
+  if (style && style.parentNode) {
+    style.parentNode.removeChild(style);
+    sheetsMap.delete(id);
+  }
+}
+export function createHotContext() {
+  const noop = () => {};
+  return {
+    data: {},
+    accept: noop,
+    acceptExports: noop,
+    dispose: noop,
+    prune: noop,
+    decline: noop,
+    invalidate: noop,
+    on: noop,
+    off: noop,
+    send: noop,
+  };
+}
+export function injectQuery(url, queryToInject) {
+  if (!url || (url[0] !== '.' && url[0] !== '/')) return url;
+  const pathname = url.replace(/[?#].*$/, '');
+  const parsed = new URL(url, 'http://vite.dev');
+  return pathname + '?' + queryToInject + (parsed.search ? '&' + parsed.search.slice(1) : '') + (parsed.hash || '');
+}
+export class ErrorOverlay {}
+`);
+    });
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: false, ws: false },
       appType: 'spa',
     });
     app.use(vite.middlewares);

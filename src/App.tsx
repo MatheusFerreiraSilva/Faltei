@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import React, { Suspense, useEffect, useMemo, useState } from 'react';
 import { CloudUpload } from 'lucide-react';
 import { AuthScreen } from './components/AuthScreen';
 import { BottomDock, TabKey } from './components/BottomDock';
-import { ConfigModal } from './components/ConfigModal';
 import { CumpliceIcon, CumpliceMood } from './components/CumpliceIcon';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { MateriaDrawer } from './components/MateriaDrawer';
@@ -11,7 +10,6 @@ import { TabCalendario } from './components/TabCalendario';
 import { TabGrade } from './components/TabGrade';
 import { TabHoje } from './components/TabHoje';
 import { TabMaterias } from './components/TabMaterias';
-import { TabSimulador } from './components/TabSimulador';
 import { TopBar } from './components/TopBar';
 import { useFalteiStore } from './hooks/useFalteiStore';
 import { logoutUser } from './lib/firebase';
@@ -22,11 +20,18 @@ import {
   isFeriado,
 } from './utils/attendance';
 
+const TabSimulador = React.lazy(() =>
+  import('./components/TabSimulador').then((m) => ({ default: m.TabSimulador }))
+);
+const ConfigModal = React.lazy(() => import('./components/ConfigModal'));
+const FalteiWrappedModal = React.lazy(() => import('./components/FalteiWrappedModal'));
+
 function FalteiAppShell() {
   const store = useFalteiStore();
   const [activeTab, setActiveTab] = useState<TabKey>('hoje');
   const [drawerMateriaId, setDrawerMateriaId] = useState<string | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
+  const [wrappedOpen, setWrappedOpen] = useState(false);
   const [migratingPreview, setMigratingPreview] = useState(false);
   const [requestedCalDate, setRequestedCalDate] = useState<{
     iso: string;
@@ -40,6 +45,35 @@ function FalteiAppShell() {
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
   }, [activeTab]);
+
+  // Deep-linking via notification click (?tab=..., ?materiaId=... or SW postMessage)
+  useEffect(() => {
+    const validTabs: TabKey[] = ['hoje', 'calendario', 'materias', 'simulador', 'grade'];
+    const params = new URLSearchParams(window.location.search);
+    const paramTab = params.get('tab') as TabKey | null;
+    const paramMateriaId = params.get('materiaId');
+    if (paramTab && validTabs.includes(paramTab)) {
+      setActiveTab(paramTab);
+    }
+    if (paramMateriaId) {
+      setDrawerMateriaId(paramMateriaId);
+    }
+
+    if (!('serviceWorker' in navigator)) return;
+    const onSwMessage = (event: MessageEvent) => {
+      const msg = event.data as { type?: string; tab?: string; materiaId?: string } | undefined;
+      if (msg?.type === 'FALTEI_NAVIGATE') {
+        if (msg.tab && validTabs.includes(msg.tab as TabKey)) {
+          setActiveTab(msg.tab as TabKey);
+        }
+        if (msg.materiaId) {
+          setDrawerMateriaId(msg.materiaId);
+        }
+      }
+    };
+    navigator.serviceWorker.addEventListener('message', onSwMessage);
+    return () => navigator.serviceWorker.removeEventListener('message', onSwMessage);
+  }, []);
 
   const statsList = useMemo(
     () =>
@@ -212,6 +246,8 @@ function FalteiAppShell() {
                 userDisplayName={resolvedDisplayName}
                 isAdmin={store.isAdmin}
                 heroMood={globalMood}
+                notificationPrefs={store.notificationPrefs}
+                onActivateNotifications={() => store.updateNotificationPrefs({ ativo: true })}
                 onRecordFalta={store.recordFalta}
                 onDeleteFalta={store.deleteFalta}
                 onImportPeriodo={store.importPeriodo}
@@ -261,18 +297,27 @@ function FalteiAppShell() {
                 comunidadeMap={store.comunidadeMap}
                 onSelectMateria={(id) => setDrawerMateriaId(id)}
                 onOpenGrade={() => setActiveTab('grade')}
+                onOpenWrapped={() => setWrappedOpen(true)}
               />
             )}
 
             {activeTab === 'simulador' && (
-              <TabSimulador
-                todayStr={store.todayStr}
-                semestreConfig={store.semestreConfig}
-                materias={store.materias}
-                faltas={store.faltas}
-                onBulkProgramFaltas={store.bulkProgramFaltas}
-                onOpenGrade={() => setActiveTab('grade')}
-              />
+              <Suspense
+                fallback={
+                  <div className="bento-card p-8 text-center text-xs font-semibold text-[#475569]">
+                    Carregando simulador...
+                  </div>
+                }
+              >
+                <TabSimulador
+                  todayStr={store.todayStr}
+                  semestreConfig={store.semestreConfig}
+                  materias={store.materias}
+                  faltas={store.faltas}
+                  onBulkProgramFaltas={store.bulkProgramFaltas}
+                  onOpenGrade={() => setActiveTab('grade')}
+                />
+              </Suspense>
             )}
 
             {activeTab === 'grade' && (
@@ -318,24 +363,43 @@ function FalteiAppShell() {
         onDeleteMateria={store.deleteMateria}
       />
 
-      <ConfigModal
-        open={configOpen}
-        onClose={() => setConfigOpen(false)}
-        userProfile={store.userProfile}
-        isPreviewMode={isPreview}
-        isAdmin={store.isAdmin}
-        semestreConfig={store.semestreConfig}
-        materias={store.materias}
-        faltas={store.faltas}
-        eventos={store.eventos}
-        hasLocalPreviewToMigrate={store.hasLocalPreviewToMigrate}
-        onSavePreferences={store.updateUserPreferences}
-        onApplyPercentualAll={store.applyDefaultPercentualAll}
-        onImportPreviewToCloud={store.importPreviewDataToCloud}
-        onDismissMigrationBanner={store.dismissLocalMigrationBanner}
-        onAuthAction={handleTopAuthAction}
-        onOpenGrade={() => setActiveTab('grade')}
-      />
+      <Suspense fallback={null}>
+        {configOpen && (
+          <ConfigModal
+            open={configOpen}
+            onClose={() => setConfigOpen(false)}
+            userProfile={store.userProfile}
+            isPreviewMode={isPreview}
+            isAdmin={store.isAdmin}
+            semestreConfig={store.semestreConfig}
+            materias={store.materias}
+            faltas={store.faltas}
+            eventos={store.eventos}
+            notificationPrefs={store.notificationPrefs}
+            hasLocalPreviewToMigrate={store.hasLocalPreviewToMigrate}
+            onSavePreferences={store.updateUserPreferences}
+            onUpdateNotificationPrefs={store.updateNotificationPrefs}
+            onTestNotification={store.testCumpliceNotification}
+            onImportBackupJson={store.importBackupJson}
+            onApplyPercentualAll={store.applyDefaultPercentualAll}
+            onImportPreviewToCloud={store.importPreviewDataToCloud}
+            onDismissMigrationBanner={store.dismissLocalMigrationBanner}
+            onAuthAction={handleTopAuthAction}
+            onOpenGrade={() => setActiveTab('grade')}
+          />
+        )}
+
+        {wrappedOpen && (
+          <FalteiWrappedModal
+            open={wrappedOpen}
+            onClose={() => setWrappedOpen(false)}
+            displayName={resolvedDisplayName}
+            semestreConfig={store.semestreConfig}
+            statsList={statsList}
+            faltas={store.faltas}
+          />
+        )}
+      </Suspense>
     </div>
   );
 }

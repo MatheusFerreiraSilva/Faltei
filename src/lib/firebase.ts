@@ -137,3 +137,53 @@ export async function updateFirebaseDisplayName(displayName: string) {
 export async function logoutUser() {
   return signOut(auth);
 }
+
+export async function registerMessagingToken(): Promise<string | null> {
+  if (typeof window === 'undefined' || !('Notification' in window)) return null;
+  if (Notification.permission !== 'granted') return null;
+
+  try {
+    const messagingMod = await import('firebase/messaging');
+    const supported = await messagingMod.isSupported();
+    if (!supported) return null;
+
+    const messaging = messagingMod.getMessaging(app);
+    let serviceWorkerRegistration: ServiceWorkerRegistration | undefined;
+    if ('serviceWorker' in navigator) {
+      serviceWorkerRegistration = await navigator.serviceWorker.ready;
+    }
+
+    const vapidKey = import.meta.env.VITE_FIREBASE_VAPID_KEY;
+    const token = await messagingMod.getToken(messaging, {
+      ...(serviceWorkerRegistration ? { serviceWorkerRegistration } : {}),
+      ...(typeof vapidKey === 'string' && vapidKey.trim() ? { vapidKey: vapidKey.trim() } : {}),
+    });
+    return token || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function subscribeForegroundMessages(
+  onPayload: (payload: { title?: string; body?: string; data?: Record<string, string> }) => void
+): Promise<() => void> {
+  if (typeof window === 'undefined') return () => {};
+  try {
+    const messagingMod = await import('firebase/messaging');
+    const supported = await messagingMod.isSupported();
+    if (!supported) return () => {};
+
+    const messaging = messagingMod.getMessaging(app);
+    const unsub = messagingMod.onMessage(messaging, (payload) => {
+      onPayload({
+        title: payload.notification?.title,
+        body: payload.notification?.body,
+        data: payload.data,
+      });
+    });
+    return unsub;
+  } catch {
+    return () => {};
+  }
+}
+
